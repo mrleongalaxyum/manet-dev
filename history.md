@@ -33,6 +33,12 @@ Correct EU channel 5 → 863000 + 5×500 = 865500 kHz (865.5 MHz) ✓
 - **HaLow (wlan2/morse)** always uses EU regardless of cfg80211 global domain — morse phy is self-managed and registers EU S1G channels via `regulatory_hint()`.
 - **Conclusion:** No regulatory changes needed. WORLD is already optimal for WiFi range. HaLow stays EU for correct S1G frequencies.
 
+### batman-if-setup.sh: HaLow enslaved first as batman-adv primary
+
+Changed interface enslavement order in `batman-if-setup.sh`: HaLow (wlan2) is now added to bat0 **before** standard 802.11 interfaces (wlan0/wlan1). Rationale: HaLow is the longest-range link — when standard 802.11 peers go out of range, batman-adv needs at least one active interface to continue generating and processing OGMs. If HaLow is the last one added and standard interfaces timeout first, OGM propagation stops.
+
+Also: standard interface detection changed from polling for netdev existence to polling for `type mesh point` (iw dev check), ensuring wpa_supplicant has fully initialized the mesh interface before batman-adv enslaves it.
+
 ### Node status (end of session 4)
 
 | Hostname   | LAN IP        | Mesh IPs               | wlan0 | wlan1 | wlan2 | bat0 |
