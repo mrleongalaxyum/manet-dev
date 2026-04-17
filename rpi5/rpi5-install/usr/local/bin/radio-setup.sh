@@ -9,9 +9,6 @@
 exec > >(tee /var/log/radio-setup.log) 2>&1
 set -x
 
-# default lobby frequencies for wifi
-FREQS=("2412" "5180")
-
 # This loop reads the stored setup variables to set the current config
 while IFS= read -r line; do
     # Skip empty lines
@@ -386,10 +383,23 @@ iface_driver() {
 
 is_halow_iface() {
     local iface="$1"
-    local driver
+    local driver phyname
 
     driver="$(iface_driver "$iface")"
-    [[ "$driver" == morse* ]]
+    [[ "$driver" == morse* ]] && return 0
+
+    # Fallback: USB HaLow adapters may report a USB driver name instead of
+    # morse via sysfs.  A wireless phy with no standard 2.4/5 GHz frequencies
+    # is a sub-GHz (HaLow) device.
+    phyname="$(iface_phy "$iface")"
+    [[ -z "$phyname" ]] && return 1
+
+    if ! iw phy "$phyname" info 2>/dev/null | grep -q "2412\.0 MHz" && \
+       ! iw phy "$phyname" info 2>/dev/null | grep -q "5180\.0 MHz"; then
+        return 0
+    fi
+
+    return 1
 }
 
 is_nonmesh_wifi() {
@@ -421,9 +431,23 @@ iface_supports_freq() {
     local iface="$1"
     local freq="$2"
     local phyname
-
     phyname="$(iface_phy "$iface")"
-    [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "MHz \\[$freq\\]"
+    [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "${freq}\\.0 MHz"
+}
+
+iface_mesh_freq() {
+    local iface="$1"
+    local phyname
+    phyname="$(iface_phy "$iface")"
+    [[ -z "$phyname" ]] && echo "" && return
+
+    if iw phy "$phyname" info 2>/dev/null | grep -q "2412\\.0 MHz"; then
+        echo "2412"
+    elif iw phy "$phyname" info 2>/dev/null | grep -q "5180\\.0 MHz"; then
+        echo "5180"
+    else
+        echo ""
+    fi
 }
 
 for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
@@ -563,28 +587,168 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
 fi
 
 # ============================================================================
+# === CLEANUP STALE PER-INTERFACE SERVICES AND CONFIGS ===
+# ============================================================================
+# Previous runs may have enabled wpa_supplicant or s1g services for interfaces
+# that no longer hold those roles (e.g. after a .link rename swapped which
+# physical card is wlanX). Disable any per-interface service whose target
+# interface isn't currently classified for that role.
+
+current_mesh="$(cat /var/lib/mesh_if 2>/dev/null | tr '\n' ' ')"
+current_halow="$(cat /var/lib/halow_if 2>/dev/null | tr '\n' ' ')"
+
+cleanup_iface_service() {
+    local svc_pattern="$1"   # e.g. "wpa_supplicant@wlan*.service"
+    local valid_list="$2"    # space-separated interface names that should keep this service
+    local svc iface link
+
+    # Find enabled units by looking at symlinks in target wants directories.
+    # This catches both concrete units and instantiated template units.
+    for link in /etc/systemd/system/*.wants/$svc_pattern \
+                /etc/systemd/system/*.requires/$svc_pattern; do
+        [ -L "$link" ] || continue
+        svc="$(basename "$link")"
+
+        iface="$(echo "$svc" | sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
+        [[ "$iface" == "$svc" ]] && continue
+
+        if ! echo " $valid_list " | grep -q " $iface "; then
+            echo " > Disabling stale service: $svc (iface $iface no longer in role)"
+            systemctl disable --now "$svc" 2>/dev/null || true
+            systemctl reset-failed "$svc" 2>/dev/null || true
+        fi
+    done
+
+    # Also catch units that are loaded/failed but never had an enable symlink
+    # (e.g. started manually, or left over after their wants symlink was removed
+    # but the runtime instance kept lingering).
+    for svc in $(systemctl list-units --all --no-legend --state=failed,loaded "$svc_pattern" 2>/dev/null | awk '{print $1}'); do
+        iface="$(echo "$svc" | sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
+        [[ "$iface" == "$svc" ]] && continue
+
+        if ! echo " $valid_list " | grep -q " $iface "; then
+            echo " > Cleaning up stale runtime instance: $svc"
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl reset-failed "$svc" 2>/dev/null || true
+        fi
+    done
+}
+
+cleanup_iface_service 'wpa_supplicant@wlan*.service' "$current_mesh"
+cleanup_iface_service 'wpa_supplicant-s1g-wlan*.service' "$current_halow"
+
+# Remove stale per-interface wpa_supplicant config files for interfaces that
+# don't currently hold a wireless role. mesh-boot-lobby.service blindly copies
+# every *-lobby.conf at boot, so leftovers will resurrect dead configs.
+all_wireless_roles="$current_mesh $current_halow"
+for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
+    [ -e "$conf" ] || continue
+    iface="$(basename "$conf" | sed -E 's/^wpa_supplicant-(wlan[0-9]+).*/\1/')"
+    if ! echo " $all_wireless_roles " | grep -q " $iface "; then
+        echo " > Removing stale wpa_supplicant config: $conf"
+        rm -f "$conf"
+    fi
+done
+
+# ============================================================================
 # === CONFIGURE MESH INTERFACES (excluding AP if needed) ===
 # ============================================================================
 
-# Wi-Fi wlanX names are assigned by the kernel and can appear in a different
-# order on otherwise identical Pi 5 nodes. Do not try to persistently rename
-# wireless interfaces to wlanX by MAC: systemd .link renames can collide with
-# already-created kernel names and leave saved role files pointing at the wrong
-# radios after reboot. Runtime role files below are the source of truth.
+# Pin wlanX names by MAC so role assignments survive reboot in a predictable
+# order: wlan0=2.4GHz mesh, wlan1=5GHz mesh, wlan2=HaLow, wlan3=non-mesh AP.
+# The classification above already determined which physical phy plays which
+# role; we now bind that role to a stable MAC-keyed name via systemd .link.
+# These take effect at next boot — current run uses kernel-assigned names from
+# the role files.
 rm -f /etc/systemd/network/10-wlan*.link
 
+iface_mac() {
+    cat "/sys/class/net/$1/address" 2>/dev/null
+}
+
+write_link_file() {
+    local target_name="$1"
+    local mac="$2"
+    [[ -z "$mac" ]] && return
+
+cat <<-EOF > /etc/systemd/network/10-${target_name}.link
+[Match]
+MACAddress=$mac
+Type=wlan
+
+[Link]
+Name=$target_name
+EOF
+    echo " > Pinning $target_name to MAC $mac"
+}
+
+# Mesh interfaces are already ordered: [0]=2.4GHz, [1]=5GHz
+[ "${#mesh_ifaces[@]}" -gt 0 ] && write_link_file wlan0 "$(iface_mac "${mesh_ifaces[0]}")"
+[ "${#mesh_ifaces[@]}" -gt 1 ] && write_link_file wlan1 "$(iface_mac "${mesh_ifaces[1]}")"
+[ "${#halow_ifaces[@]}" -gt 0 ] && write_link_file wlan2 "$(iface_mac "${halow_ifaces[0]}")"
+[ "${#nonmesh_ifaces[@]}" -gt 0 ] && write_link_file wlan3 "$(iface_mac "${nonmesh_ifaces[0]}")"
 echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 
-CT=0
+
+# Detect if the .link files we just wrote disagree with current runtime names.
+# If they do, the next boot will rename interfaces and the role files we wrote
+# this run will be stale. Schedule a post-reboot re-run to refresh them.
+needs_rerun=0
+check_rename() {
+    local target="$1"
+    local current="$2"
+    [[ -z "$current" ]] && return
+    [[ "$target" == "$current" ]] && return
+    echo " > Rename pending: $current -> $target (next boot)"
+    needs_rerun=1
+}
+
+[ "${#mesh_ifaces[@]}" -gt 0 ] && check_rename wlan0 "${mesh_ifaces[0]}"
+[ "${#mesh_ifaces[@]}" -gt 1 ] && check_rename wlan1 "${mesh_ifaces[1]}"
+[ "${#halow_ifaces[@]}" -gt 0 ] && check_rename wlan2 "${halow_ifaces[0]}"
+[ "${#nonmesh_ifaces[@]}" -gt 0 ] && check_rename wlan3 "${nonmesh_ifaces[0]}"
+
+if [ "$needs_rerun" -eq 1 ]; then
+    echo " > Interface renames staged. Scheduling post-reboot re-run."
+
+cat << 'EOF' > /etc/systemd/system/radio-setup-rerun.service
+[Unit]
+Description=Re-run radio-setup after interface rename
+After=multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/radio-setup.sh
+ExecStartPost=/bin/systemctl disable radio-setup-rerun.service
+ExecStartPost=/bin/rm -f /etc/systemd/system/radio-setup-rerun.service
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable radio-setup-rerun.service
+    touch /var/lib/radio-setup-reboot-pending
+else
+    echo " > Interface names already match desired layout, no rename needed"
+fi
+
 for WLAN in $(cat /var/lib/mesh_if); do
     # Skip this interface if it's the AP interface
     if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
         echo " > Skipping $WLAN (will be used as AP)"
-        ((CT++))
         continue
     fi
 
-    echo " > Setting SAE key/SSID for $WLAN ..."
+    FREQ=$(iface_mesh_freq "$WLAN")
+    if [[ -z "$FREQ" ]]; then
+        echo " > WARNING: Cannot determine band for $WLAN, skipping"
+        continue
+    fi
+
+    echo " > Setting SAE key/SSID for $WLAN (${FREQ} MHz) ..."
 
 cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
 ctrl_interface=/var/run/wpa_supplicant
@@ -595,7 +759,7 @@ ap_scan=2
 network={
     ssid="$MESH_NAME"
     mode=5
-    frequency=${FREQS[$CT]}
+    frequency=${FREQ}
     key_mgmt=SAE
     sae_password="$KEY"
     ieee80211w=2
@@ -618,7 +782,6 @@ EOF
     echo " > Enabling $WLAN for mesh use ..."
     cp /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf /etc/wpa_supplicant/wpa_supplicant-$WLAN.conf
     systemctl enable wpa_supplicant@$WLAN.service
-    ((CT++))
 done
 
 # ============================================================================
@@ -1334,3 +1497,14 @@ sleep 2
 networkctl
 iw dev
 ip -br a
+
+if [ -f /var/lib/radio-setup-reboot-pending ]; then
+    rm -f /var/lib/radio-setup-reboot-pending
+    echo ""
+    echo "=================================================="
+    echo " Interface renames pending - rebooting in 5s"
+    echo " radio-setup will re-run automatically after boot"
+    echo "=================================================="
+    sleep 5
+    reboot
+fi

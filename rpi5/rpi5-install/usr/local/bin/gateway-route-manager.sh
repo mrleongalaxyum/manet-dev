@@ -15,7 +15,7 @@ log() {
 
 get_gateway_mac() {
     batctl gwl 2>/dev/null | awk '
-        tolower($1) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ { print tolower($1); exit }
+        /^\*/ && tolower($2) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ { print tolower($2); exit }
     '
 }
 
