@@ -56,22 +56,12 @@ Spajanje na uređaje se vrši putem lokalnih IP adresa (port 22).
 
 ---
 
-## Stanje skripti (rpi5-install)
+## Repozitorij i skripte
 
-Skripte u `rpi5/rpi5-install/usr/local/bin/` su referentni izvor. Povučene su s uređaja mesh-78f3 (192.168.1.198) dana 2026-04-17.
+- **GitHub:** https://github.com/mrleongalaxyum/manet-dev (private)
+- **Referentni node:** mesh-78f7 (192.168.1.53) — na njemu sve radi ispravno
+- `rpi5/rpi5-install/` — install paket, sinkroniziran s 78f7 (2026-04-17)
+- `rpi5/rpi5-live/78f3/` i `rpi5/rpi5-live/78f7/` — live snapshoti skripti s nodova
+- `rpi5/rpi5-install.tar.gz` — uploadан na Ventum (`/rpi5/rpi5-install.tar.gz`) i dostupan na Colorado SFTP (`/rpi5/rpi5-install.tar.gz`)
 
-**Referentni node: mesh-78f7 (192.168.1.53)** — na njemu sve radi ispravno.
-
-**Datoteke ažurirane s uređaja (povučene s 78f7 kao referentnog):**
-- `gateway-route-manager.sh`
-- `radio-setup.sh`
-- `ethernet-autodetect.sh` — uklonjena linija `systemctl restart systemd-networkd` (bug na 78f3, ne postoji na 78f7)
-- `mesh-ip-manager.sh` — novija verzija s 78f7
-
-**Razlike između nodova (2026-04-17):**
-- `ethernet-autodetect.sh`: 78f3 ima buggy liniju `systemctl restart systemd-networkd` (l.102), 78f7 nema
-- `mesh-ip-manager.sh`: 78f3 i 78f7 se razlikuju — 78f7 je referentna
-
-**Datoteke prisutne lokalno ali ne na uređaju (dio install paketa, ne tools):**
-- `batman-if-setup.sh.bak`, `chronyc`, `morse_cli`, `NodeInfo.proto`, `README.md`, `version.txt`
-- `etc/systemd/network/`, `etc/udev/`, `etc/manet_version.txt`
+Za povijest izmjena i bugova vidi [history.md](history.md).
