@@ -420,41 +420,6 @@ fi
 
 log "Chunk-based IP allocation: chunk_size=$CHUNK_SIZE (max_euds=$MAX_EUDS)"
 
-# Remove stale mesh IPs from br0 that don't belong to our persistent chunk.
-# These accumulate across reboots when a node gets a different chunk each time —
-# old IPs are never removed because ip addr add is called but ip addr del is not.
-# A stale IP on br0 causes other nodes' pings to that IP to be answered locally,
-# breaking gateway-route-manager reachability checks.
-cleanup_stale_br0_ips() {
-    local prefix="${IPV4_NETWORK#*/}"
-    local persistent_primary="" persistent_secondary=""
-
-    # Load persistent chunk IPs if we have them
-    if [ -f "$PERSISTENT_STATE_FILE" ]; then
-        source "$PERSISTENT_STATE_FILE" 2>/dev/null
-    fi
-    if [ -n "${PERSISTENT_CHUNK:-}" ]; then
-        local chunk_ips
-        chunk_ips=$(get_chunk_ips "$PERSISTENT_CHUNK")
-        IFS=: read -r persistent_primary persistent_secondary _ _ <<< "$chunk_ips"
-    fi
-
-    # Remove all mesh-subnet IPs from br0 except the persistent chunk's two IPs
-    while IFS= read -r line; do
-        local ip
-        ip=$(echo "$line" | grep -oP 'inet \K[\d.]+')
-        [ -n "$ip" ] || continue
-        ip_in_cidr "$ip" "$IPV4_NETWORK" || continue
-        is_service_reserved_ip "$ip" && continue
-        if [ "$ip" = "$persistent_primary" ] || [ "$ip" = "$persistent_secondary" ]; then
-            continue
-        fi
-        ip addr del "${ip}/${prefix}" dev "$CONTROL_IFACE" 2>/dev/null && \
-            log "Removed stale br0 IP: $ip" || true
-    done < <(ip addr show dev "$CONTROL_IFACE" | grep 'inet ')
-}
-cleanup_stale_br0_ips
-
 # Load persistent state
 if [ -f "$PERSISTENT_STATE_FILE" ]; then
     source "$PERSISTENT_STATE_FILE" 2>/dev/null
@@ -537,25 +502,25 @@ case $IPV4_STATE in
         
         log "Proposed chunk $PROPOSED_CHUNK: primary=$BR0_PRIMARY, gateway=$BR0_SECONDARY, dhcp=$DHCP_START-$DHCP_END"
 
-        # Check for conflicts
+        # For persistent chunks, skip the claimed_chunks conflict check and assign directly.
+        # claimed_chunks.txt lives in /tmp and is lost on reboot, so it routinely contains
+        # stale entries from other nodes. A false conflict here clears persistent state and
+        # causes the node to pick a random new chunk — exactly the churn we want to avoid.
+        # Real conflicts (two live nodes with the same IPs) are resolved by the MAC tie-breaker
+        # in the CONFIGURED branch, which operates on actual live ARP data.
         CONFLICT=false
-        for entry in "${CLAIMED_CHUNKS[@]}"; do
-            CLAIMED_CHUNK=$(echo "$entry" | cut -d',' -f1)
-            if [[ "$CLAIMED_CHUNK" == "$PROPOSED_CHUNK" ]]; then
-                CONFLICT=true
-                break
-            fi
-        done
+        if [ "$SHOULD_USE_PERSISTENT" = false ]; then
+            for entry in "${CLAIMED_CHUNKS[@]}"; do
+                CLAIMED_CHUNK=$(echo "$entry" | cut -d',' -f1)
+                if [[ "$CLAIMED_CHUNK" == "$PROPOSED_CHUNK" ]]; then
+                    CONFLICT=true
+                    break
+                fi
+            done
+        fi
 
         if [ "$CONFLICT" = true ]; then
-            if [ "$SHOULD_USE_PERSISTENT" = true ]; then
-                log "Previous chunk ${PROPOSED_CHUNK} is now in use. Will select new chunk next cycle."
-                PERSISTENT_IPV4=""
-                PERSISTENT_CHUNK=""
-                save_persistent_state
-            else
-                log "Proposed chunk ${PROPOSED_CHUNK} is in use. Will retry next cycle."
-            fi
+            log "Proposed chunk ${PROPOSED_CHUNK} is in use. Will retry next cycle."
         else
             log "Claiming chunk ${PROPOSED_CHUNK} with br0 IPs ${BR0_PRIMARY} and ${BR0_SECONDARY}..."
             
