@@ -200,17 +200,31 @@ def get_my_hostname():
 # Local Node Detail Gathering
 # ─────────────────────────────────────────────────────────────────────────────
 def get_battery():
-    """Return battery percentage int or None."""
+    """Return battery dict from battery-reader.py output, or None.
+
+    Dict keys: percentage, voltage_mv, current_ma, power_mw, charging, status, timestamp.
+    Falls back to /sys/class/power_supply capacity (int) for backwards compat.
+    """
+    try:
+        with open('/run/battery_status.json') as f:
+            data = json.load(f)
+        if data.get('percentage') is not None:
+            return data
+    except Exception:
+        pass
+    # Fallback: kernel power_supply sysfs (only present when I2C driver registers the device)
     for root, dirs, files in os.walk('/sys/class/power_supply'):
         for d in dirs:
-            cap_path = os.path.join(root, d, 'capacity')
+            cap_path  = os.path.join(root, d, 'capacity')
             type_path = os.path.join(root, d, 'type')
             try:
                 with open(type_path) as f:
                     if f.read().strip().lower() != 'battery':
                         continue
                 with open(cap_path) as f:
-                    return int(f.read().strip())
+                    return {'percentage': int(f.read().strip()), 'status': 'unknown',
+                            'voltage_mv': None, 'current_ma': None, 'power_mw': None,
+                            'charging': None, 'timestamp': None}
             except Exception:
                 continue
     return None
@@ -637,7 +651,7 @@ def assemble_status_data():
             )),
             'uptime':       fmt_uptime(ndata.get('UPTIME_SECONDS', '')),
             'cpu':          ndata.get('CPU_LOAD_AVERAGE', ''),
-            'battery':      ndata.get('BATTERY_PERCENTAGE', ''),
+            'battery':      {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None,
             'mumble':       ndata.get('IS_MUMBLE_SERVER', 'false').lower() == 'true',
             'mediamtx':     ndata.get('IS_MEDIAMTX_SERVER', 'false').lower() == 'true',
             'ntp':          ndata.get('IS_NTP_SERVER', 'false').lower() == 'true',
@@ -657,7 +671,7 @@ def assemble_status_data():
             'ip': (state.get('CURRENT_IPV4') or ''),
             'tq': 255, 'is_me': True, 'is_direct': True,
             'is_gateway': False, 'is_selected_gw': False,
-            'uptime': '', 'cpu': '', 'battery': '',
+            'uptime': '', 'cpu': '', 'battery': None,
             'mumble': False, 'mediamtx': False, 'ntp': False,
             'state': 'ACTIVE', 'ch_2g': '', 'ch_5g': '', 'limp': False,
         })
@@ -1025,11 +1039,18 @@ function renderNodeList(nodes) {
     const bar = `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
     const meta = n.uptime  ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
     const cpu  = n.cpu     ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
+    let battMeta = '';
+    if (n.battery != null) {
+      const pct = n.battery.percentage;
+      const col = battColor(pct);
+      const icon = (n.battery.charging === true) ? '⚡' : (pct <= 15 ? '⚠' : '');
+      battMeta = `<span style="color:${col};font-size:10px">${icon}${pct}%</span>`;
+    }
 
     return `<div class="${cls}" data-id="${n.id}">
       <div class="node-name">${n.hostname}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px">OFFLINE</span>':''}</div>
       <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
-      <div class="node-meta">${tqBadge}${badges.join('')}${meta}${cpu}</div>
+      <div class="node-meta">${tqBadge}${badges.join('')}${meta}${cpu}${battMeta}</div>
       ${bar}
     </div>`;
   }).join('');
@@ -1463,9 +1484,21 @@ function renderLocalPanel(d) {
   // Battery
   let battHtml = '—';
   if (d.battery != null) {
-    const pct = d.battery;
+    const b   = d.battery;
+    const pct = b.percentage;
     const col = battColor(pct);
-    battHtml = `${pct}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${pct}%;background:${col}"></span></span>`;
+    let extra = '';
+    if (b.voltage_mv != null) {
+      const v   = (b.voltage_mv / 1000).toFixed(2);
+      const mA  = b.current_ma != null ? b.current_ma : null;
+      const mW  = b.power_mw  != null ? b.power_mw  : null;
+      const st  = b.status || '';
+      const stIcon = st === 'charging' ? ' ⚡' : st === 'full' ? ' ✓' : '';
+      const mAstr  = mA != null ? ` &nbsp;${mA > 0 ? '+' : ''}${mA}mA` : '';
+      const mWstr  = mW != null ? ` &nbsp;${mW}mW` : '';
+      extra = `<span style="font-size:9px;color:var(--muted)"> ${v}V${mAstr}${mWstr}${stIcon}</span>`;
+    }
+    battHtml = `${pct}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${pct}%;background:${col}"></span></span>${extra}`;
   }
 
   // GPS
