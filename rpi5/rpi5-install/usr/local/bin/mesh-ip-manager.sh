@@ -420,6 +420,41 @@ fi
 
 log "Chunk-based IP allocation: chunk_size=$CHUNK_SIZE (max_euds=$MAX_EUDS)"
 
+# Remove stale mesh IPs from br0 that don't belong to our persistent chunk.
+# These accumulate across reboots when a node gets a different chunk each time —
+# old IPs are never removed because ip addr add is called but ip addr del is not.
+# A stale IP on br0 causes other nodes' pings to that IP to be answered locally,
+# breaking gateway-route-manager reachability checks.
+cleanup_stale_br0_ips() {
+    local prefix="${IPV4_NETWORK#*/}"
+    local persistent_primary="" persistent_secondary=""
+
+    # Load persistent chunk IPs if we have them
+    if [ -f "$PERSISTENT_STATE_FILE" ]; then
+        source "$PERSISTENT_STATE_FILE" 2>/dev/null
+    fi
+    if [ -n "${PERSISTENT_CHUNK:-}" ]; then
+        local chunk_ips
+        chunk_ips=$(get_chunk_ips "$PERSISTENT_CHUNK")
+        IFS=: read -r persistent_primary persistent_secondary _ _ <<< "$chunk_ips"
+    fi
+
+    # Remove all mesh-subnet IPs from br0 except the persistent chunk's two IPs
+    while IFS= read -r line; do
+        local ip
+        ip=$(echo "$line" | grep -oP 'inet \K[\d.]+')
+        [ -n "$ip" ] || continue
+        ip_in_cidr "$ip" "$IPV4_NETWORK" || continue
+        is_service_reserved_ip "$ip" && continue
+        if [ "$ip" = "$persistent_primary" ] || [ "$ip" = "$persistent_secondary" ]; then
+            continue
+        fi
+        ip addr del "${ip}/${prefix}" dev "$CONTROL_IFACE" 2>/dev/null && \
+            log "Removed stale br0 IP: $ip" || true
+    done < <(ip addr show dev "$CONTROL_IFACE" | grep 'inet ')
+}
+cleanup_stale_br0_ips
+
 # Load persistent state
 if [ -f "$PERSISTENT_STATE_FILE" ]; then
     source "$PERSISTENT_STATE_FILE" 2>/dev/null
