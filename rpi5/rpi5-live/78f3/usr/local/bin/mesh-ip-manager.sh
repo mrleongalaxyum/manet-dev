@@ -70,6 +70,12 @@ FORCED_CHUNK=""
 FORCED_GW=""
 FORCED_DNS=""
 
+if [ -f "$FORCE_CONF" ]; then
+    # shellcheck disable=SC1090
+    . "$FORCE_CONF"
+    log "Loaded forced mesh IP config from $FORCE_CONF"
+fi
+
 PERSISTENT_IPV4=""
 PERSISTENT_CHUNK=""
 PERSISTENT_NETWORK=""
@@ -78,14 +84,6 @@ PERSISTENT_NETWORK=""
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - IP-MGR: $1" >&2
 }
-
-
-if [ -f "$FORCE_CONF" ]; then
-    # shellcheck disable=SC1090
-    . "$FORCE_CONF"
-    log "Loaded forced mesh IP config from $FORCE_CONF"
-fi
-
 
 # Converts an IP string to a 32-bit integer
 ip_to_int() {
