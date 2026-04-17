@@ -53,3 +53,17 @@ curl -u clanker:really-strong-password-321 -T <file> https://manet.ventum.hr/upl
 - **Password:** raspberry
 
 Spajanje na uređaje se vrši putem lokalnih IP adresa (port 22).
+
+---
+
+## Stanje skripti (rpi5-install)
+
+Skripte u `rpi5/rpi5-install/usr/local/bin/` su referentni izvor. Povučene su s uređaja mesh-78f3 (192.168.1.198) dana 2026-04-17.
+
+**Datoteke ažurirane s uređaja (novije od tarballa):**
+- `gateway-route-manager.sh`
+- `radio-setup.sh`
+
+**Datoteke prisutne lokalno ali ne na uređaju (dio install paketa, ne tools):**
+- `batman-if-setup.sh.bak`, `chronyc`, `morse_cli`, `NodeInfo.proto`, `README.md`, `version.txt`
+- `etc/systemd/network/`, `etc/udev/`, `etc/manet_version.txt`
