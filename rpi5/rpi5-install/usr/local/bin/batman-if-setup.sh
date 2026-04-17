@@ -172,17 +172,69 @@ start() {
         echo "Set to gateway client mode"
     fi
 
+# -------------------------------------------------------------------------
+    # HaLow / 802.11ah interfaces (added FIRST to become batman-adv primary)
+    #
+    # HaLow is the longest-range link and most likely to remain connected when
+    # standard 802.11ax peers are out of range. Making it the primary ensures
+    # batman-adv continues generating and processing OGMs even when all
+    # standard mesh interfaces go inactive.
+    #
+    # wpa_supplicant_s1g owns these devices. Do NOT call 'ip link set type mesh'
+    # on an S1G interface. Some Morse driver builds do not report operstate UP
+    # even when batman-adv can enslave the interface, so wait for the netdev to
+    # exist and let batctl's retry loop decide whether the interface is usable.
+    # -------------------------------------------------------------------------
+    for WLAN in $HALOW_INTERFACES; do
+        echo "--> Configuring HaLow interface: $WLAN (primary)"
+
+        echo "Waiting for $WLAN netdev (managed by wpa_supplicant_s1g)..."
+        for i in {1..30}; do
+            if ip link show "$WLAN" >/dev/null 2>&1; then
+                ip link set "$WLAN" up 2>/dev/null || true
+                echo "$WLAN exists."
+                break
+            fi
+            if [ $i -eq 30 ]; then
+                echo "!! Timed out waiting for $WLAN. Skipping." >&2
+                continue 2
+            fi
+            sleep 1
+        done
+
+        ip link set "$WLAN" mtu 1532 2>/dev/null || true
+
+        echo "Adding HaLow $WLAN to bat0..."
+
+        ADDED=false
+        for attempt in {1..5}; do
+            if batctl bat0 if add "$WLAN" 2>&1; then
+                sleep 0.5
+                if batctl bat0 if | grep -q "$WLAN"; then
+                    echo "$WLAN successfully added to bat0 (primary interface)"
+                    ADDED=true
+                    break
+                else
+                    echo "Attempt $attempt: $WLAN not showing in batctl, retrying..."
+                fi
+            else
+                echo "Attempt $attempt: batctl add failed, retrying..."
+            fi
+            sleep 1
+        done
+
+        if [ "$ADDED" = false ]; then
+            echo "!! ERROR: Failed to add HaLow $WLAN to bat0 after 5 attempts" >&2
+            echo "!! This interface will not participate in the mesh" >&2
+        fi
+    done
+
     # -------------------------------------------------------------------------
     # Standard 802.11 mesh interfaces
     # -------------------------------------------------------------------------
     for WLAN in $STANDARD_MESH_INTERFACES; do
         echo "--> Configuring standard mesh interface: $WLAN"
 
-        # wpa_supplicant owns standard mesh interfaces. Do not force the type
-        # here or we can race the supplicant and knock the interface back to
-        # managed mode. Wait until wpa_supplicant has set the interface to
-        # mesh point mode — operstate UP is NOT required (no peers nearby is
-        # normal; batman-adv can enslave a DOWN/DORMANT mesh interface).
         echo "Waiting for $WLAN to be in mesh point mode (managed by wpa_supplicant)..."
         for i in {1..30}; do
             if iw dev "$WLAN" info 2>/dev/null | grep -q "type mesh point"; then
@@ -196,14 +248,10 @@ start() {
             sleep 1
         done
 
-        # Add extra delay for wpa_supplicant to fully initialize
         sleep 2
 
-        # batman-adv with a 1500-byte bat0 needs mesh members that can carry
-        # the BATMAN header. Some drivers reset this when the mesh joins.
         ip link set "$WLAN" mtu 1532 2>/dev/null || true
 
-        # Now add to bat0 with verification and retry
         echo "Adding $WLAN to bat0..."
 
         ADDED=false
@@ -225,60 +273,6 @@ start() {
 
         if [ "$ADDED" = false ]; then
             echo "!! ERROR: Failed to add $WLAN to bat0 after 5 attempts" >&2
-            echo "!! This interface will not participate in the mesh" >&2
-        fi
-    done
-
-    # -------------------------------------------------------------------------
-    # HaLow / 802.11ah interfaces
-    #
-    # wpa_supplicant_s1g owns these devices. Do NOT call 'ip link set type mesh'
-    # on an S1G interface. Some Morse driver builds do not report operstate UP
-    # even when batman-adv can enslave the interface, so wait for the netdev to
-    # exist and let batctl's retry loop decide whether the interface is usable.
-    # -------------------------------------------------------------------------
-    for WLAN in $HALOW_INTERFACES; do
-        echo "--> Configuring HaLow interface: $WLAN"
-
-        echo "Waiting for $WLAN netdev (managed by wpa_supplicant_s1g)..."
-        for i in {1..30}; do
-            if ip link show "$WLAN" >/dev/null 2>&1; then
-                ip link set "$WLAN" up 2>/dev/null || true
-                echo "$WLAN exists."
-                break
-            fi
-            if [ $i -eq 30 ]; then
-                echo "!! Timed out waiting for $WLAN. Skipping." >&2
-                continue 2
-            fi
-            sleep 1
-        done
-
-        # Keep HaLow consistent with the standard mesh members before enslaving.
-        ip link set "$WLAN" mtu 1532 2>/dev/null || true
-
-        # Add to bat0 with verification and retry (same as standard path)
-        echo "Adding HaLow $WLAN to bat0..."
-
-        ADDED=false
-        for attempt in {1..5}; do
-            if batctl bat0 if add "$WLAN" 2>&1; then
-                sleep 0.5
-                if batctl bat0 if | grep -q "$WLAN"; then
-                    echo "$WLAN successfully added to bat0"
-                    ADDED=true
-                    break
-                else
-                    echo "Attempt $attempt: $WLAN not showing in batctl, retrying..."
-                fi
-            else
-                echo "Attempt $attempt: batctl add failed, retrying..."
-            fi
-            sleep 1
-        done
-
-        if [ "$ADDED" = false ]; then
-            echo "!! ERROR: Failed to add HaLow $WLAN to bat0 after 5 attempts" >&2
             echo "!! This interface will not participate in the mesh" >&2
         fi
     done
