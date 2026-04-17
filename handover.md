@@ -38,31 +38,38 @@ sftp -i .ssh/colorado-manet-key -P 11238 clanker@www.colorado-governor.com
 curl -u clanker:really-strong-password-321 -T <file> https://manet.ventum.hr/upload/rpi5/<file>
 ```
 
+**Local server:** 192.168.1.131, user: leon, password: hobbyking. Files are served from `~/Desktop/MANET/manet/` inside a Docker nginx container. The `/upload/` endpoint maps to that same directory.
+
 ---
 
-## LAN Uređaji (lokalne IP adrese za spajanje)
+## LAN Devices
 
-| Port (WAN) | Lokalna IP     | Hostname  | SSH port |
-|------------|----------------|-----------|----------|
-| 3254       | 192.168.1.198  | mesh-78f3 | 22       |
-| 3255       | 192.168.1.51   | mesh-f86f | 22       |
-| 3256       | 192.168.1.53   | mesh-78f7 | 22       |
-| 3257       | 192.168.1.50   | mesh-7946 | 22       |
+| WAN Port | Local IP      | Hostname  | SSH Port |
+|----------|---------------|-----------|----------|
+| 3254     | 192.168.1.198 | mesh-78f3 | 22       |
+| 3255     | 192.168.1.51  | mesh-f86f | 22       |
+| 3256     | 192.168.1.53  | mesh-78f7 | 22       |
+| 3257     | 192.168.1.50  | mesh-7946 | 22       |
 
 - **User:** radio
 - **Password:** raspberry
 
-Spajanje na uređaje se vrši putem lokalnih IP adresa (port 22).
+Connect via local IP addresses on port 22.
 
 ---
 
-## Repozitorij i skripte
+## Repository and Scripts
 
 - **GitHub:** https://github.com/mrleongalaxyum/manet-dev (private)
-- **Referentni node:** mesh-78f7 (192.168.1.53) — na njemu sve radi ispravno
-- `rpi5/rpi5-install/` — install paket, sinkroniziran s 78f7 (2026-04-17)
-- `rpi5/rpi5-live/78f3/` i `rpi5/rpi5-live/78f7/` — live snapshoti skripti s nodova
-- `rpi5/rpi5-install.tar.gz` — uploadан na Ventum (`/rpi5/rpi5-install.tar.gz`) i dostupan na Colorado SFTP (`/rpi5/rpi5-install.tar.gz`)
-- **VAŽNO:** tarball mora biti pakiran bez prefix foldera (iz unutar `rpi5-install/` direktorija: `tar -czf ../rpi5-install.tar.gz .`) kako bi se ekstraktao direktno u `/` na nodeu. Pakiranje iz parent direktorija (`tar -czf rpi5-install.tar.gz rpi5-install/`) stvara krivi prefix i skripte završe u `/rpi5-install/` umjesto `/`.
+- **Reference node:** mesh-78f7 (192.168.1.53) — known good configuration
+- `rpi5/rpi5-install/` — install package, synced from mesh-78f7 (2026-04-17)
+- `rpi5/rpi5-live/78f3/` and `rpi5/rpi5-live/78f7/` — live script snapshots from nodes
+- `rpi5/rpi5-install.tar.gz` — uploaded to Ventum (`/manet/rpi5/rpi5-install.tar.gz`) and available on Colorado SFTP (`/rpi5/rpi5-install.tar.gz`)
 
-Za povijest izmjena i bugova vidi [history.md](history.md).
+**IMPORTANT — tarball packaging:** The tarball must be built from inside the `rpi5-install/` directory so it extracts directly to `/` on the node:
+```bash
+cd rpi5/rpi5-install && tar -czf ../rpi5-install.tar.gz .
+```
+Building from the parent directory (`tar -czf rpi5-install.tar.gz rpi5-install/`) creates a prefix folder and scripts end up at `/rpi5-install/` instead of `/`.
+
+For change history and bug log see [history.md](history.md).
