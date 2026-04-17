@@ -61,9 +61,8 @@ Connect via local IP addresses on port 22.
 ## Repository and Scripts
 
 - **GitHub:** https://github.com/mrleongalaxyum/manet-dev (private)
-- **Reference node:** mesh-78f7 (192.168.1.53) — known good configuration
-- `rpi5/rpi5-install/` — install package, synced from mesh-78f7 (2026-04-17)
-- `rpi5/rpi5-live/78f3/` and `rpi5/rpi5-live/78f7/` — live script snapshots from nodes
+- `rpi5/rpi5-install/` — install package (all 4 nodes provisioned from this as of 2026-04-17)
+- `rpi5/rpi5-live/78f3/` and `rpi5/rpi5-live/78f7/` — live script snapshots from nodes (taken 2026-04-17, before full reprovision)
 - `rpi5/rpi5-install.tar.gz` — uploaded to Ventum (`/manet/rpi5/rpi5-install.tar.gz`) and available on Colorado SFTP (`/rpi5/rpi5-install.tar.gz`)
 
 **IMPORTANT — tarball packaging:** The tarball must be built from inside the `rpi5-install/` directory so it extracts directly to `/` on the node:
