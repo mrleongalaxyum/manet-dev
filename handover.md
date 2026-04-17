@@ -63,5 +63,6 @@ Spajanje na uređaje se vrši putem lokalnih IP adresa (port 22).
 - `rpi5/rpi5-install/` — install paket, sinkroniziran s 78f7 (2026-04-17)
 - `rpi5/rpi5-live/78f3/` i `rpi5/rpi5-live/78f7/` — live snapshoti skripti s nodova
 - `rpi5/rpi5-install.tar.gz` — uploadан na Ventum (`/rpi5/rpi5-install.tar.gz`) i dostupan na Colorado SFTP (`/rpi5/rpi5-install.tar.gz`)
+- **VAŽNO:** tarball mora biti pakiran bez prefix foldera (iz unutar `rpi5-install/` direktorija: `tar -czf ../rpi5-install.tar.gz .`) kako bi se ekstraktao direktno u `/` na nodeu. Pakiranje iz parent direktorija (`tar -czf rpi5-install.tar.gz rpi5-install/`) stvara krivi prefix i skripte završe u `/rpi5-install/` umjesto `/`.
 
 Za povijest izmjena i bugova vidi [history.md](history.md).
