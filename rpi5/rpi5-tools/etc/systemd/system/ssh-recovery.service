@@ -1,0 +1,11 @@
+[Unit]
+Description=Ensure MANET SSH access is available
+After=local-fs.target
+Before=network-online.target batman-enslave.service alfred.service node-manager.service hostapd.service dnsmasq.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ssh-recovery.sh
+
+[Install]
+WantedBy=multi-user.target

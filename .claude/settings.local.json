@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wget -r -np -nH --cut-dirs=2 -P /home/leon/Desktop/manet-dev https://www.colorado-governor.com/manet/rpi5/)",
+      "Bash(curl -s https://www.colorado-governor.com/manet/rpi5/)",
+      "Bash(curl -s -I https://www.colorado-governor.com/manet/rpi5/)",
+      "Bash(chmod 600 /home/leon/Desktop/manet-dev/.ssh/colorado-manet-key)",
+      "Bash(chmod 600 /home/leon/Desktop/manet-dev/.ssh/credentials)",
+      "Bash(sftp -i /home/leon/Desktop/manet-dev/.ssh/colorado-manet-key -o StrictHostKeyChecking=no clanker@www.colorado-governor.com)",
+      "Bash(timeout 5 bash -c 'echo >/dev/tcp/www.colorado-governor.com/__TRACKED_VAR__')",
+      "Bash(sftp -i /home/leon/Desktop/manet-dev/.ssh/colorado-manet-key -o StrictHostKeyChecking=no -P 11238 clanker@www.colorado-governor.com)",
+      "Bash(sftp -i .ssh/colorado-manet-key -o StrictHostKeyChecking=no -P 11238 clanker@www.colorado-governor.com)"
+    ]
+  }
+}
