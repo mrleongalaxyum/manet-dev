@@ -9,6 +9,11 @@
 exec > >(tee /var/log/radio-setup.log) 2>&1
 set -x
 
+led_error() {
+    echo heartbeat > /sys/class/leds/PWR/trigger
+}
+trap led_error ERR
+
 # This loop reads the stored setup variables to set the current config
 while IFS= read -r line; do
     # Skip empty lines
@@ -1497,6 +1502,8 @@ sleep 2
 networkctl
 iw dev
 ip -br a
+
+echo heartbeat > /sys/class/leds/ACT/trigger
 
 if [ -f /var/lib/radio-setup-reboot-pending ]; then
     rm -f /var/lib/radio-setup-reboot-pending
