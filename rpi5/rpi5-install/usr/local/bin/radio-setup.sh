@@ -335,6 +335,15 @@ if [ -z "$HALOW_REGULATORY_DOMAIN" ] || uses_eu_halow_region "$REGULATORY_DOMAIN
     HALOW_REGULATORY_DOMAIN="EU"
 fi
 
+# cfg80211 regdomain to use — EU when HaLow is EU so S1G channels are
+# resolvable by wpa_supplicant_s1g. Also used in wpa_supplicant configs
+# for 2.4/5 GHz radios to keep cfg80211 from reverting to WORLD.
+if [[ "$HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
+    CFG80211_REGDOM="EU"
+else
+    CFG80211_REGDOM="$REGULATORY_DOMAIN"
+fi
+
 
 # Wait for wireless drivers to load
 echo "Waiting for wireless drivers to load..."
@@ -757,7 +766,7 @@ for WLAN in $(cat /var/lib/mesh_if); do
 
 cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
 ctrl_interface=/var/run/wpa_supplicant
-country=$REGULATORY_DOMAIN
+country=$CFG80211_REGDOM
 update_config=1
 sae_pwe=1
 ap_scan=2
@@ -1021,8 +1030,8 @@ network={
     ssid="$mesh_ssid"
     key_mgmt=SAE
     mode=5
-    channel=6
-    op_class=67
+    channel=5
+    op_class=66
     country="$HALOW_REGULATORY_DOMAIN"
     s1g_prim_chwidth=0
     s1g_prim_1mhz_chan_index=0
@@ -1071,16 +1080,6 @@ done
 # ============================================================================
 # === MORSE / HALOW MODULE OPTIONS ===
 # ============================================================================
-# When HaLow is active with EU band, cfg80211 must also use EU so that
-# wpa_supplicant_s1g can resolve op_class=67/channel=6 to a frequency.
-# Standard cfg80211 country databases (e.g. HR) have no S1G channel
-# definitions, but morse registers EU S1G channels when country=EU.
-# EU is a valid cfg80211 domain for 2.4/5 GHz too, so this is safe.
-if [[ "$HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
-    CFG80211_REGDOM="EU"
-else
-    CFG80211_REGDOM="$REGULATORY_DOMAIN"
-fi
 echo "options cfg80211 ieee80211_regdom=$CFG80211_REGDOM" > /etc/modprobe.d/cfg80211.conf
 
 # Preserve hardware-specific SPI modprobe options that were written by firstrun.

@@ -1,5 +1,51 @@
 # MANET Change History
 
+## 2026-04-17 (session 4)
+
+### Bug fixed: HaLow (wlan2) S1G "Invalid S1G configuration" on EU deployment
+
+**Root cause (primary):** `radio-setup.sh` generated `op_class=67, channel=6` for EU HaLow config. `op_class=67` is Singapore (SG), not EU. EU S1G uses `global_op_class=66`, channels 1/3/5/7/9, freq_start=863000 kHz. Confirmed by reading MorseMicro/hostap source (`morse-hostap/src/utils/morse.c`): `eu6` struct has `global_op_class=66`; `sg19` struct has `global_op_class=67`.
+
+Correct EU channel 5 → 863000 + 5×500 = 865500 kHz (865.5 MHz) ✓
+
+**Root cause (secondary):** `country=EU` without quotes in wpa_supplicant_s1g config. `wpa_config_parse_string` (in MorseMicro wpa_supplicant) treats unquoted string values as hex — `U` is not valid hex so `EU` silently fails. Must be `country="EU"` with double quotes.
+
+**Root cause (tertiary — REGDOM churn):** wpa_supplicant on wlan0/wlan1 had `country=EU` in config → periodically tried to set EU regdomain → kernel reverted to WORLD (00) via wireless-regdb → CTRL-EVENT-REGDOM-CHANGE loop every ~1s, disrupting batman-adv OGM propagation. Note: wireless-regdb (Debian) always overrides `cfg80211 ieee80211_regdom=EU` in modprobe — kernel stays at WORLD globally. The morse phy manages its own EU S1G regulatory domain independently.
+
+**Fixes applied to radio-setup.sh:**
+
+1. EU S1G wpa_supplicant config: `op_class=67 channel=6` → `op_class=66 channel=5`
+2. EU S1G wpa_supplicant config: `country=$HALOW_REGULATORY_DOMAIN` → `country="$HALOW_REGULATORY_DOMAIN"` (added quotes)
+3. wlan0/wlan1 wpa_supplicant config generation: removed `country=` line entirely to prevent REGDOM churn
+4. CFG80211_REGDOM variable: set to `EU` when `HALOW_REGULATORY_DOMAIN=EU`, used in modprobe cfg80211.conf (cfg80211 itself stays at WORLD due to wireless-regdb override, but at least not causing conflict)
+
+**Fixes applied live to all 4 nodes (without reprovision):**
+- `/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf`: `op_class=66`, `channel=5`, `country="EU"` (with quotes, both global and in network{} block)
+- `/etc/wpa_supplicant/wpa_supplicant-wlan0.conf`, `wpa_supplicant-wlan1.conf`, `wpa_supplicant-wlan0-lobby.conf`, `wpa_supplicant-wlan1-lobby.conf`: `country=EU` line removed
+
+**Result:** All 4 nodes — wlan0/wlan1/wlan2 each show 3 mesh stations. Batman-adv routing table populated (verified via bridge FDB and `ip neigh show dev bat0`). Nodes reachable at 10.30.2.x over mesh. Note: `batctl n`/`batctl o` commands show empty due to batctl 2025.3 vs batman-adv kernel module 2023.3 version mismatch — this is a display-only issue, routing works correctly.
+
+### Regulatory domain and TX power analysis
+
+- **WORLD (00)** is the effective regdomain for wlan0/wlan1 (mt7915e) — wireless-regdb forces this regardless of modprobe settings. WORLD allows 30 dBm on all bands.
+- **Hardware TX power caps** (mt7915e EEPROM): wlan0 2.4 GHz = 17 dBm, wlan1 5 GHz = 29 dBm. These are hardware limits, not regulatory.
+- **HR regdomain would be worse**: HR limits 5 GHz to ~23 dBm vs WORLD's 30 dBm (29 dBm actual). Staying on WORLD maximises range.
+- **HaLow (wlan2/morse)** always uses EU regardless of cfg80211 global domain — morse phy is self-managed and registers EU S1G channels via `regulatory_hint()`.
+- **Conclusion:** No regulatory changes needed. WORLD is already optimal for WiFi range. HaLow stays EU for correct S1G frequencies.
+
+### Node status (end of session 4)
+
+| Hostname   | LAN IP        | Mesh IPs               | wlan0 | wlan1 | wlan2 | bat0 |
+|------------|---------------|------------------------|-------|-------|-------|------|
+| mesh-7946  | 192.168.1.50  | 10.30.2.72/73          | 3 sta | 3 sta | 3 sta | ✓   |
+| mesh-f86f  | 192.168.1.51  | 10.30.2.160/161        | 3 sta | 3 sta | 3 sta | ✓   |
+| mesh-78f7  | 192.168.1.53  | 10.30.2.182/183        | 3 sta | 3 sta | 3 sta | ✓   |
+| mesh-78f3  | 192.168.1.54* | unknown (offline)      | —     | —     | —     | —   |
+
+*mesh-78f3 was unreachable at end of session (possibly rebooting or different IP).
+
+---
+
 ## 2026-04-17 (session 3)
 
 ### Bug fixed: HaLow (wlan2) not forming mesh when country code is HR

@@ -44,12 +44,14 @@ curl -u clanker:really-strong-password-321 -T <file> https://manet.ventum.hr/upl
 
 ## LAN Devices
 
-| WAN Port | Local IP      | Hostname  | SSH Port |
-|----------|---------------|-----------|----------|
-| 3254     | 192.168.1.198 | mesh-78f3 | 22       |
-| 3255     | 192.168.1.51  | mesh-f86f | 22       |
-| 3256     | 192.168.1.53  | mesh-78f7 | 22       |
-| 3257     | 192.168.1.50  | mesh-7946 | 22       |
+| WAN Port | Local IP      | Hostname  | SSH Port | Mesh IPs        |
+|----------|---------------|-----------|----------|-----------------|
+| 3254     | 192.168.1.54* | mesh-78f3 | 22       | unknown         |
+| 3255     | 192.168.1.51  | mesh-f86f | 22       | 10.30.2.160/161 |
+| 3256     | 192.168.1.53  | mesh-78f7 | 22       | 10.30.2.182/183 |
+| 3257     | 192.168.1.50  | mesh-7946 | 22       | 10.30.2.72/73   |
+
+*mesh-78f3 moved from 192.168.1.198 to 192.168.1.54 after reprovisioning (DHCP). Confirm with `nmap -sn 192.168.1.0/24`.
 
 - **User:** radio
 - **Password:** raspberry
