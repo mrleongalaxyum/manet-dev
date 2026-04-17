@@ -99,8 +99,7 @@ detect_hotplug_mode() {
     fi
 
     ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
-    networkctl reload 2>/dev/null || true
-    networkctl reconfigure end0 2>/dev/null || true
+    systemctl restart systemd-networkd 2>/dev/null || true
 
     ip=$(wait_for_end0_ip 20 || true)
     if [ -n "$ip" ]; then

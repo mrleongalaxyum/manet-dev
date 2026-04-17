@@ -60,9 +60,17 @@ Spajanje na uređaje se vrši putem lokalnih IP adresa (port 22).
 
 Skripte u `rpi5/rpi5-install/usr/local/bin/` su referentni izvor. Povučene su s uređaja mesh-78f3 (192.168.1.198) dana 2026-04-17.
 
-**Datoteke ažurirane s uređaja (novije od tarballa):**
+**Referentni node: mesh-78f7 (192.168.1.53)** — na njemu sve radi ispravno.
+
+**Datoteke ažurirane s uređaja (povučene s 78f7 kao referentnog):**
 - `gateway-route-manager.sh`
 - `radio-setup.sh`
+- `ethernet-autodetect.sh` — uklonjena linija `systemctl restart systemd-networkd` (bug na 78f3, ne postoji na 78f7)
+- `mesh-ip-manager.sh` — novija verzija s 78f7
+
+**Razlike između nodova (2026-04-17):**
+- `ethernet-autodetect.sh`: 78f3 ima buggy liniju `systemctl restart systemd-networkd` (l.102), 78f7 nema
+- `mesh-ip-manager.sh`: 78f3 i 78f7 se razlikuju — 78f7 je referentna
 
 **Datoteke prisutne lokalno ali ne na uređaju (dio install paketa, ne tools):**
 - `batman-if-setup.sh.bak`, `chronyc`, `morse_cli`, `NodeInfo.proto`, `README.md`, `version.txt`
