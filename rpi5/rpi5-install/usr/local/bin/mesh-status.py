@@ -1419,22 +1419,29 @@ function drawTopo() {
     ctx.lineWidth = n.is_me ? 2.5 : (isHover ? 2 : 1.5);
     ctx.stroke();
 
-    // Gateway star
+    // Icon inside node: gateway star takes priority, THIS NODE gets dot overlay
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     if (n.is_gateway) {
       ctx.fillStyle = n.is_selected_gw ? '#f59e0b' : '#f59e0b80';
       ctx.font = `${Math.round(r * 0.9)}px serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
       ctx.fillText('★', n.x, n.y);
-      ctx.textBaseline = 'alphabetic';
     } else if (n.is_me) {
       ctx.fillStyle = '#818cf8';
       ctx.font = `${Math.round(r)}px "Courier New"`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
       ctx.fillText('◉', n.x, n.y);
-      ctx.textBaseline = 'alphabetic';
     }
+    // THIS NODE: small filled dot in top-right corner of circle
+    if (n.is_me) {
+      ctx.beginPath();
+      ctx.arc(n.x + r * 0.65, n.y - r * 0.65, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#818cf8';
+      ctx.fill();
+      ctx.strokeStyle = '#0a0e14';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.textBaseline = 'alphabetic';
 
     // Label
     ctx.fillStyle = isHover ? '#ffffff' : col + 'cc';
@@ -1464,6 +1471,21 @@ function startSim(data) {
 function screenToSim(sx, sy) {
   return { x: (sx - view.x) / view.scale, y: (sy - view.y) / view.scale };
 }
+
+// ── Canvas click → open peer drawer ──────────────────────────────────────────
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const { x: mx, y: my } = screenToSim(e.clientX - rect.left, e.clientY - rect.top);
+  const clicked = SIM.nodes.find(n => {
+    const dx = n.x - mx, dy = n.y - my;
+    return Math.sqrt(dx*dx + dy*dy) < n.r + 12;
+  });
+  if (!clicked) return;
+  if (clicked.is_me) { closePeerDrawer(); return; }
+  // Find full node data from DATA
+  const node = DATA && DATA.nodes.find(n => n.id === clicked.id);
+  if (node) openPeerDrawer(node);
+});
 
 // ── Tooltip ───────────────────────────────────────────────────────────────────
 canvas.addEventListener('mousemove', e => {
@@ -1555,10 +1577,11 @@ canvas.addEventListener('touchstart', e => {
     }) || null;
     if (dragNode) {
       dragOX = mx - dragNode.x; dragOY = my - dragNode.y;
+      e.preventDefault(); // only prevent default when dragging a node
     } else {
       isPanning = true; lastPanX = sx; lastPanY = sy;
+      e.preventDefault(); // prevent scroll while panning canvas
     }
-    e.preventDefault();
   } else if (e.touches.length === 2) {
     dragNode = null; isPanning = false;
     pinchDist0  = getTouchDist(e.touches);
@@ -1606,12 +1629,12 @@ canvas.addEventListener('touchend', e => {
     const wasPanning = isPanning;
     dragNode = null; isPanning = false;
 
-    // Tap detection: short time, small movement, single touch, no drag/pan
+    // Tap detection: short time, small movement
     const dt = Date.now() - touchStartT;
     const ct = e.changedTouches[0];
     const dx = ct.clientX - touchStartX, dy = ct.clientY - touchStartY;
     const dist = Math.sqrt(dx*dx + dy*dy);
-    if (dt < 300 && dist < 10 && !wasDraggingNode) {
+    if (dt < 300 && dist < 12) {
       const rect = canvas.getBoundingClientRect();
       const sx = ct.clientX - rect.left, sy = ct.clientY - rect.top;
       const { x: mx, y: my } = screenToSim(sx, sy);
