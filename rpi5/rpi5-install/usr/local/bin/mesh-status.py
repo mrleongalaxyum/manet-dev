@@ -1546,6 +1546,7 @@ canvas.addEventListener('touchstart', e => {
   const rect = canvas.getBoundingClientRect();
   if (e.touches.length === 1) {
     const t = e.touches[0];
+    touchStartX = t.clientX; touchStartY = t.clientY; touchStartT = Date.now();
     const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
     const { x: mx, y: my } = screenToSim(sx, sy);
     dragNode = SIM.nodes.find(n => {
@@ -1596,9 +1597,45 @@ canvas.addEventListener('touchmove', e => {
   }
 }, { passive: false });
 
+let touchStartX = 0, touchStartY = 0, touchStartT = 0;
+
 canvas.addEventListener('touchend', e => {
   if (e.touches.length < 2) { pinchDist0 = 0; }
-  if (e.touches.length === 0) { dragNode = null; isPanning = false; }
+  if (e.touches.length === 0) {
+    const wasDraggingNode = dragNode;
+    const wasPanning = isPanning;
+    dragNode = null; isPanning = false;
+
+    // Tap detection: short time, small movement, single touch, no drag/pan
+    const dt = Date.now() - touchStartT;
+    const ct = e.changedTouches[0];
+    const dx = ct.clientX - touchStartX, dy = ct.clientY - touchStartY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dt < 300 && dist < 10 && !wasDraggingNode) {
+      const rect = canvas.getBoundingClientRect();
+      const sx = ct.clientX - rect.left, sy = ct.clientY - rect.top;
+      const { x: mx, y: my } = screenToSim(sx, sy);
+      const hit = SIM.nodes.find(n => {
+        const ndx = n.x - mx, ndy = n.y - my;
+        return Math.sqrt(ndx*ndx + ndy*ndy) < n.r + 14;
+      });
+      if (hit) {
+        if (hit.is_me) {
+          closePeerDrawer();
+          if (LOCAL_COLLAPSED) {
+            LOCAL_COLLAPSED = false;
+            document.getElementById('local-panel').style.display = '';
+            document.getElementById('local-chevron').textContent = '▾';
+          }
+          document.getElementById('local-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else {
+          const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
+          if (listRow) listRow.scrollIntoView({ block: 'nearest' });
+          openPeerDrawer(hit);
+        }
+      }
+    }
+  }
 });
 
 // ── Panel drag-to-resize (mobile) ────────────────────────────────────────────
