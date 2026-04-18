@@ -1456,6 +1456,20 @@ EOF
 systemctl enable mesh-status
 
 # ============================================================================
+# === mDNS — manet.local ===
+# ============================================================================
+# Advertise this node as manet.local on the AP/EUD interface only.
+# avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
+# Clients connected to the EUD AP can reach the admin panel at http://manet.local
+
+apt install -y avahi-daemon 2>/dev/null || true
+install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
+cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
+cp /usr/local/share/manet/manet-http.service /etc/avahi/services/manet-http.service
+systemctl enable avahi-daemon
+systemctl restart avahi-daemon || true
+
+# ============================================================================
 # === UPS HAT (E) BATTERY MONITOR ===
 # ============================================================================
 
@@ -1489,7 +1503,7 @@ systemctl enable battery-reader.service
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
-    apt remove -y network-manager avahi*
+    apt remove -y network-manager
     systemctl mask rpi-eeprom-update.service
     systemctl set-default multi-user.target
 
