@@ -1027,7 +1027,6 @@ STATUS_HTML = r"""<!DOCTYPE html>
         <div id="local-content" style="color:var(--muted);padding:8px 10px;font-size:11px">Loading…</div>
       </div>
       <div class="section-hdr">MESH NODES <span id="node-count"></span></div>
-      <div id="node-list"></div>
       <div id="peer-drawer">
         <div id="peer-drawer-hdr">
           <span id="peer-drawer-title">—</span>
@@ -1035,6 +1034,7 @@ STATUS_HTML = r"""<!DOCTYPE html>
         </div>
         <div id="peer-drawer-body"><div class="peer-loading">Loading…</div></div>
       </div>
+      <div id="node-list"></div>
     </div>
   </div>
 </div>
