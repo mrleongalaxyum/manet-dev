@@ -212,10 +212,15 @@ Cilj: korisnik s mobitela može otvoriti admin panel bez znanja IP adrese, samo 
 - AP interface nije uvijek `wlan3` — ovisi o nodu, čita se iz `/var/lib/ap_interface` (runtime) i `/var/lib/no_mesh_if`
 - mDNS broadcast treba ići samo na AP interface, ne na mesh interfaces (wlan0/1/2, bat0, br0)
 
-### Plan
+### Implementacija — manet.local mDNS (branch `admin-panel-mdns`)
 
-Reinstalirati avahi-daemon ali s restriktivnom konfiguracijom:
-- `allow-interfaces=<AP_IFACE>` — samo AP interface
-- `deny-interfaces=bat0,br0,wlan0,wlan1,wlan2` — eksplicitno zabraniti mesh
-- Custom `.service` file koji broadcasta `manet` na portu 80
-- radio-setup.sh: ukloniti avahi iz `apt remove`, dodati avahi konfiguraciju i service file
+**Problem:** avahi je bio namjerno uklonjen pri provisioning-u (`apt remove avahi*`). AP interface nije uvijek `wlan3` — ovisi o nodu, čita se iz `/var/lib/ap_interface`. wlan3 je enslaved u `br0` pa nema vlastitu IPv4 adresu — avahi treba slušati na `br0`.
+
+**Rješenje:**
+- avahi-daemon reinstaliran, konfiguriran da **deny** bat0/wlan0/wlan1/wlan2 (ne allow — zbog br0)
+- `host-name=manet` → svaki node broadcasta kao `manet.local`
+- `/etc/avahi/services/manet-http.service` advertisa `_http._tcp` port 80
+- `radio-setup.sh`: uklonjen avahi iz `apt remove`, dodana instalacija + konfiguracija
+- Konfig fajlovi u tarbalu: `usr/local/share/manet/avahi-daemon.conf` i `manet-http.service`
+
+**Testirano:** mobitel spojen na AP od mesh-78f3 uspješno otvara `http://manet.local`.

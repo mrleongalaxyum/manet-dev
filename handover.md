@@ -122,7 +122,17 @@ ssh radio@10.30.2.182   # password: raspberry
 
 ### AP interface
 
-AP interface (non-mesh, for EUD hotspot) varies per node — stored at runtime in `/var/lib/ap_interface`. Non-mesh interfaces listed in `/var/lib/no_mesh_if`. Do **not** assume `wlan3` — always read from these files. Relevant for mDNS: avahi should only broadcast on the AP interface, not on mesh interfaces.
+AP interface (non-mesh, for EUD hotspot) varies per node — stored at runtime in `/var/lib/ap_interface`. Non-mesh interfaces listed in `/var/lib/no_mesh_if`. Do **not** assume `wlan3` — always read from these files.
+
+### mDNS — manet.local
+
+Every node advertises itself as `manet.local` via avahi-daemon. EUD clients connected to the node's AP can open `http://manet.local` to reach the admin panel (port 80).
+
+- **Config:** `/etc/avahi/avahi-daemon.conf` — `host-name=manet`, denies bat0/wlan0/wlan1/wlan2
+- **Service:** `/etc/avahi/services/manet-http.service` — advertises `_http._tcp` port 80
+- avahi broadcasts on `br0` (which wlan3 is enslaved to) so IPv4 resolves correctly
+- avahi was previously removed in provisioning — now kept, but mesh interfaces are denied
+- Source files in tarball: `usr/local/share/manet/avahi-daemon.conf` and `manet-http.service`
 
 ### Known live deviations from repo (as of 2026-04-18)
 
