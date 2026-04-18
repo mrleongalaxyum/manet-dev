@@ -128,3 +128,71 @@ Dynamic gateway works: whichever node has ethernet becomes `batctl gw_mode serve
 - **ethernet-autodetect.sh** (mesh-78f3): contained spurious line `systemctl restart systemd-networkd 2>/dev/null || true` (l.102) — not present on reference node mesh-78f7, removed from rpi5-install
 - **mesh-ip-manager.sh**: differed between mesh-78f3 and mesh-78f7 — updated to mesh-78f7 version
 - **tarball prefix bug**: tarball was built from parent directory (`tar -czf rpi5-install.tar.gz rpi5-install/`), causing extraction to `/rpi5-install/` instead of `/` on the node. Fixed by building from inside the directory (`cd rpi5-install && tar -czf ../rpi5-install.tar.gz .`)
+
+## 2026-04-18
+
+### UPS HAT (E) battery monitoring — branch `ups-battery-monitor`
+
+Waveshare UPS HAT (E) je montiran na svim 4 nodeovima. Implementiran battery monitoring koji čita MCU i publicira podatke kroz mesh.
+
+#### Ispravan chip i register map
+
+Inicijalna pretpostavka bila je da RPi direktno čita INA219 na `0x40`. To je **pogrešno** — INA219 je interno spojen na IP2368 MCU i nije direktno dostupan. Svi podaci čitaju se s IP2368 MCU na `0x2D`:
+
+| Register | Sadržaj | Format |
+|----------|---------|--------|
+| `0x02`   | Status byte: bit6=fast_charging, bit7=charging, bit5=discharging | uint8 |
+| `0x10`   | VBUS voltage(mV), current(mA), power(mW) | 3×uint16 LE |
+| `0x20`   | Battery voltage(mV), current(mA signed), percent, capacity(mAh), runtime, time-to-full | 6×uint16 LE |
+| `0x30`   | Cell voltages V1-V4 (mV) | 4×uint16 LE |
+
+Shutdown trigger: bilo koja ćelija < 3150 mV dok se ne puni (prema Waveshare sample kodu).
+
+#### I2C enable na RPi5
+
+RPi5 koristi `i2c_designware` driver (ne `i2c-bcm2835`). Za `/dev/i2c-1`:
+1. `dtparam=i2c_arm=on` u `/boot/firmware/config.txt` (Bookworm) ili `/boot/config.txt` (stariji)
+2. `i2c-dev` u `/etc/modules`
+3. **Reboot obavezan** — `modprobe i2c-dev` ne stvara `/dev/i2c-1` bez device tree overlay-a
+
+Ispravna provjera u radio-setup.sh: `grep -q '^dtparam=i2c_arm=on$'` (exact match), sa fallbackom na `/boot/config.txt`.
+
+#### Novi fajlovi
+
+- `usr/local/bin/battery-reader.py` — čita IP2368 MCU svakih 30s, piše `/run/battery_status.json`
+- `etc/systemd/system/battery-reader.service` — systemd unit, starts after multi-user.target
+
+#### JSON schema
+
+```json
+{
+  "percentage": 85,
+  "voltage_v": 15.208,
+  "current_ma": 1178,
+  "power_w": 26.796,
+  "charging": true,
+  "status": "fast_charging",
+  "cell_mv": [3813, 3796, 3797, 3802],
+  "timestamp": 1713394823
+}
+```
+
+#### Integracija u mesh
+
+- `node-manager-static.sh` i `node-manager-acs.sh`: čitaju `/run/battery_status.json` i prosljeđuju `--battery-percentage` encoderu
+- `encoder.py` / `decoder.py`: već imaju `battery_percentage` u protobuf shemi (field 31), nije trebalo mijenjati
+- `mesh-status.py`: local panel pokazuje voltage/current/power/status; peer kartice pokazuju `⚡85%`
+
+#### Hardverski problemi
+
+- **mesh-78f3**: HAT nije bio dobro sjedeći na GPIO headerima — I2C bus potpuno prazan (`i2cdetect` ne vidi ni `0x2D`). Riješeno lemljenjem kontakata.
+- **mesh-78f7**: Baterija se ispraznila, node se nije bootao. Nakon punjenja normalno se bootao.
+
+#### Live stanje nodova (2026-04-18)
+
+| Node | Baterija | Napon | Status |
+|------|----------|-------|--------|
+| mesh-f86f | 100% | 16.745V | full |
+| mesh-7946 | ~37% | 14.543V | fast_charging |
+| mesh-78f7 | 69% | 15.357V | fast_charging |
+| mesh-78f3 | 58% | 15.208V | fast_charging |
