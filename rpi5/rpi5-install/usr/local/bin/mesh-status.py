@@ -923,17 +923,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .warn-count  { display:inline-block; padding:1px 5px; border-radius:3px; font-size:10px;
                background:#f9731620; color:var(--warn); margin-left:6px; vertical-align:middle; }
 /* ── Peer Detail Drawer ── */
-#peer-drawer { display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
-               background: var(--surface); border-top: 2px solid var(--accent);
-               max-height: 60vh; overflow-y: auto; padding-bottom: env(safe-area-inset-bottom,0); }
-#peer-drawer.open { display: block; }
+#peer-drawer { display: none; border-top: 2px solid var(--accent); background: var(--surface);
+               flex-shrink: 0; max-height: 55vh; overflow-y: auto; }
+#peer-drawer.open { display: flex; flex-direction: column; }
 #peer-drawer-hdr { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-                   border-bottom: 1px solid var(--border); background: #0d1520; position: sticky; top: 0; z-index: 1; }
+                   border-bottom: 1px solid var(--border); background: #0d1520;
+                   position: sticky; top: 0; z-index: 1; flex-shrink: 0; }
 #peer-drawer-title { flex: 1; font-size: 13px; font-weight: bold; color: var(--accent); }
 #peer-drawer-close { background: none; border: none; color: var(--muted); font-size: 18px;
                      cursor: pointer; line-height: 1; padding: 0 4px; }
 #peer-drawer-close:hover { color: var(--text); }
-#peer-drawer-body { padding: 0; }
+#peer-drawer-body { overflow-y: auto; flex: 1; }
 .peer-loading { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; letter-spacing: 1px; }
 .node-row.peer-selected { background: #1a2535; outline: 1px solid var(--accent); outline-offset: -1px; }
 .eud-row { padding: 4px 10px; border-bottom: 1px solid #1e304820; font-size: 11px; }
@@ -1028,18 +1028,17 @@ STATUS_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="section-hdr">MESH NODES <span id="node-count"></span></div>
       <div id="node-list"></div>
+      <div id="peer-drawer">
+        <div id="peer-drawer-hdr">
+          <span id="peer-drawer-title">—</span>
+          <button id="peer-drawer-close" onclick="closePeerDrawer()">✕</button>
+        </div>
+        <div id="peer-drawer-body"><div class="peer-loading">Loading…</div></div>
+      </div>
     </div>
   </div>
 </div>
 <div id="tooltip"></div>
-
-<div id="peer-drawer">
-  <div id="peer-drawer-hdr">
-    <span id="peer-drawer-title">—</span>
-    <button id="peer-drawer-close" onclick="closePeerDrawer()">✕</button>
-  </div>
-  <div id="peer-drawer-body"><div class="peer-loading">Loading…</div></div>
-</div>
 
 <script>
 // ── Data & State ────────────────────────────────────────────────────────────
@@ -1474,6 +1473,7 @@ canvas.addEventListener('mousemove', e => {
   }) || null;
 
   const tip = document.getElementById('tooltip');
+  canvas.style.cursor = HOVER_NODE ? 'pointer' : 'default';
   if (HOVER_NODE) {
     const n = HOVER_NODE;
     const svcs = [n.is_gateway?'Gateway':'', n.mumble?'Mumble':'', n.mediamtx?'MediaMTX':'', n.ntp?'NTP':''].filter(Boolean);
@@ -1497,6 +1497,21 @@ canvas.addEventListener('mouseleave', () => {
   HOVER_NODE = null;
   document.getElementById('tooltip').style.display = 'none';
   if (!SIM.running) drawTopo();
+});
+
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const { x: mx, y: my } = screenToSim(e.clientX - rect.left, e.clientY - rect.top);
+  const hit = SIM.nodes.find(n => {
+    const dx = n.x - mx, dy = n.y - my;
+    return Math.sqrt(dx*dx + dy*dy) < n.r + 10;
+  });
+  if (!hit) return;
+  if (hit.is_me) { closePeerDrawer(); return; }
+  // Sync selection with node list
+  const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
+  if (listRow) listRow.scrollIntoView({ block: 'nearest' });
+  openPeerDrawer(hit);
 });
 
 // ── Touch: pinch-to-zoom + pan + node drag ────────────────────────────────────
