@@ -414,7 +414,7 @@ def get_interfaces():
                 health = 'info'
                 detail += ' (no cable)' if not detail.endswith(')') else ''
 
-        elif (name.startswith('wlan') or name.startswith(('halow', 'mlan'))) and name not in no_mesh_ifaces:
+        elif (name.startswith('wlan') or name.startswith(('halow', 'mlan'))) and name not in no_mesh_ifaces and name not in bat0_all_slaves:
             # wlan not in bat0 and not AP — unexpected
             freq = iw.get('freq', '')
             detail = f"Wireless {freq}GHz" if freq else 'Wireless'
