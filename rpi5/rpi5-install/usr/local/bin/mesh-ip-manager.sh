@@ -376,6 +376,9 @@ dhcp-option=6,$br0_secondary
 domain=mesh.local
 local=/mesh.local/
 
+# manet.local resolves to this node's IP so EUD clients can reach the admin panel
+address=/manet.local/$br0_secondary
+
 # Upstream DNS for EUD internet access through Ethernet
 server=1.1.1.1
 server=8.8.8.8

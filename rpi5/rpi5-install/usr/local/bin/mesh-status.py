@@ -923,16 +923,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .warn-count  { display:inline-block; padding:1px 5px; border-radius:3px; font-size:10px;
                background:#f9731620; color:var(--warn); margin-left:6px; vertical-align:middle; }
 /* ── Peer Detail Drawer ── */
-#peer-drawer { display: none; border-top: 2px solid var(--accent); background: var(--surface);
-               flex-shrink: 0; max-height: 55vh; overflow-y: auto; }
-#peer-drawer.open { display: flex; flex-direction: column; }
+#peer-drawer { display: flex; flex-direction: column; border-bottom: 1px solid var(--border);
+               background: var(--surface); flex-shrink: 0; max-height: 55vh; overflow-y: auto; }
 #peer-drawer-hdr { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
                    border-bottom: 1px solid var(--border); background: #0d1520;
                    position: sticky; top: 0; z-index: 1; flex-shrink: 0; }
 #peer-drawer-title { flex: 1; font-size: 13px; font-weight: bold; color: var(--accent); }
-#peer-drawer-close { background: none; border: none; color: var(--muted); font-size: 18px;
-                     cursor: pointer; line-height: 1; padding: 0 4px; }
-#peer-drawer-close:hover { color: var(--text); }
 #peer-drawer-body { overflow-y: auto; flex: 1; }
 .peer-loading { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; letter-spacing: 1px; }
 .node-row.peer-selected { background: #1a2535; outline: 1px solid var(--accent); outline-offset: -1px; }
@@ -1020,20 +1016,13 @@ STATUS_HTML = r"""<!DOCTYPE html>
     </div>
     <div id="drag-handle"></div>
     <div id="side-panel">
-      <div class="section-hdr" id="local-toggle" style="cursor:pointer;user-select:none;">
-        THIS NODE <span id="local-chevron">▾</span>
-      </div>
-      <div id="local-panel" class="local-panel">
-        <div id="local-content" style="color:var(--muted);padding:8px 10px;font-size:11px">Loading…</div>
-      </div>
-      <div class="section-hdr">MESH NODES <span id="node-count"></span></div>
       <div id="peer-drawer">
         <div id="peer-drawer-hdr">
           <span id="peer-drawer-title">—</span>
-          <button id="peer-drawer-close" onclick="closePeerDrawer()">✕</button>
         </div>
         <div id="peer-drawer-body"><div class="peer-loading">Loading…</div></div>
       </div>
+      <div class="section-hdr">MESH NODES <span id="node-count"></span></div>
       <div id="node-list"></div>
     </div>
   </div>
@@ -1398,25 +1387,28 @@ function drawTopo() {
   // Nodes
   SIM.nodes.forEach(n => {
     const isHover = HOVER_NODE && HOVER_NODE.id === n.id;
+    const isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID && SELECTED_PEER_ID === n.id);
     const col = n.is_me ? '#818cf8' : (n.is_gateway ? '#f59e0b' : tqColor(n.tq));
-    const r = n.r + (isHover ? 3 : 0);
+    const r = n.r + (isHover ? 3 : (isSelected ? 2 : 0));
 
-    // Glow
-    const grd = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 3);
-    grd.addColorStop(0, col + '30');
+    // Glow — brighter for selected node
+    const glowR = isSelected ? r * 4.5 : r * 3;
+    const grd = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, glowR);
+    grd.addColorStop(0, isSelected ? col + '70' : col + '30');
+    grd.addColorStop(0.4, isSelected ? col + '40' : col + '10');
     grd.addColorStop(1, col + '00');
     ctx.beginPath();
-    ctx.arc(n.x, n.y, r * 3, 0, Math.PI * 2);
+    ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
     ctx.fillStyle = grd;
     ctx.fill();
 
     // Circle
     ctx.beginPath();
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = '#0a0e14';
+    ctx.fillStyle = isSelected ? col + '22' : '#0a0e14';
     ctx.fill();
-    ctx.strokeStyle = col;
-    ctx.lineWidth = n.is_me ? 2.5 : (isHover ? 2 : 1.5);
+    ctx.strokeStyle = isSelected ? '#ffffff' : col;
+    ctx.lineWidth = isSelected ? 2.5 : (n.is_me ? 2.5 : (isHover ? 2 : 1.5));
     ctx.stroke();
 
     // Icon inside node: gateway star takes priority, THIS NODE gets dot overlay
@@ -1444,12 +1436,10 @@ function drawTopo() {
     ctx.textBaseline = 'alphabetic';
 
     // Label
-    const isSelected = SELECTED_PEER_ID && SELECTED_PEER_ID === n.id;
     ctx.fillStyle = isHover || isSelected ? '#ffffff' : col + 'cc';
     ctx.font = `${isHover || isSelected ? 'bold ' : ''}11px "Courier New"`;
     ctx.textAlign = 'center';
-    const label = n.hostname + (isSelected ? ' (de)' : '');
-    ctx.fillText(label, n.x, n.y + r + 12);
+    ctx.fillText(n.hostname, n.x, n.y + r + 12);
   });
 }
 
@@ -1483,8 +1473,7 @@ canvas.addEventListener('click', e => {
     return Math.sqrt(dx*dx + dy*dy) < n.r + 12;
   });
   if (!clicked) return;
-  if (clicked.is_me) { closePeerDrawer(); return; }
-  // Find full node data from DATA
+  if (clicked.is_me) { showLocalInDrawer(); return; }
   const node = DATA && DATA.nodes.find(n => n.id === clicked.id);
   if (node) openPeerDrawer(node);
 });
@@ -1533,17 +1522,7 @@ canvas.addEventListener('click', e => {
     return Math.sqrt(dx*dx + dy*dy) < n.r + 10;
   });
   if (!hit) return;
-  if (hit.is_me) {
-    closePeerDrawer();
-    if (LOCAL_COLLAPSED) {
-      LOCAL_COLLAPSED = false;
-      document.getElementById('local-panel').style.display = '';
-      document.getElementById('local-chevron').textContent = '▾';
-    }
-    document.getElementById('local-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    return;
-  }
-  // Sync selection with node list
+  if (hit.is_me) { showLocalInDrawer(); return; }
   const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
   if (listRow) listRow.scrollIntoView({ block: 'nearest' });
   openPeerDrawer(hit);
@@ -1646,13 +1625,7 @@ canvas.addEventListener('touchend', e => {
       });
       if (hit) {
         if (hit.is_me) {
-          closePeerDrawer();
-          if (LOCAL_COLLAPSED) {
-            LOCAL_COLLAPSED = false;
-            document.getElementById('local-panel').style.display = '';
-            document.getElementById('local-chevron').textContent = '▾';
-          }
-          document.getElementById('local-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+          showLocalInDrawer();
         } else {
           const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
           if (listRow) listRow.scrollIntoView({ block: 'nearest' });
@@ -1700,15 +1673,6 @@ window.addEventListener('resize', () => {
   if (!SIM.running) drawTopo();
 });
 
-// ── Local Node Panel ─────────────────────────────────────────────────────────
-let LOCAL_COLLAPSED = false;
-
-document.getElementById('local-toggle').addEventListener('click', () => {
-  LOCAL_COLLAPSED = !LOCAL_COLLAPSED;
-  document.getElementById('local-panel').style.display = LOCAL_COLLAPSED ? 'none' : '';
-  document.getElementById('local-chevron').textContent  = LOCAL_COLLAPSED ? '▸' : '▾';
-});
-
 function battColor(pct) {
   if (pct >= 60) return '#22c55e';
   if (pct >= 30) return '#eab308';
@@ -1716,7 +1680,7 @@ function battColor(pct) {
 }
 
 function renderLocalPanel(d) {
-  const el = document.getElementById('local-content');
+  const el = document.getElementById('peer-drawer-body');
 
   // ── Identity rows ──
   let html = '';
@@ -1828,7 +1792,7 @@ function renderLocalPanel(d) {
   }
   html += `</div>`;
 
-  el.outerHTML = `<div id="local-content">${html}</div>`;
+  el.innerHTML = html;
 }
 
 async function fetchLocal() {
@@ -1836,11 +1800,15 @@ async function fetchLocal() {
     const r = await fetch('/api/local');
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
-    renderLocalPanel(d);
     updateHealthPill(d);
+    if (SELECTED_PEER_ID === null) {
+      document.getElementById('peer-drawer-title').textContent =
+        (d.hostname || '—') + (d.ip ? '  ' + d.ip : '') + '  ★ THIS NODE';
+      renderLocalPanel(d);
+    }
   } catch (err) {
-    const el = document.getElementById('local-content');
-    if (el) el.textContent = `Error: ${err.message}`;
+    if (SELECTED_PEER_ID === null)
+      document.getElementById('peer-drawer-body').textContent = `Error: ${err.message}`;
   }
 }
 
@@ -1874,17 +1842,7 @@ document.getElementById('node-list').addEventListener('click', e => {
   if (!id || !DATA) return;
   const node = DATA.nodes.find(n => n.id === id);
   if (!node) return;
-  if (node.is_me) {
-    closePeerDrawer();
-    // Scroll to and expand local panel
-    if (LOCAL_COLLAPSED) {
-      LOCAL_COLLAPSED = false;
-      document.getElementById('local-panel').style.display = '';
-      document.getElementById('local-chevron').textContent = '▾';
-    }
-    document.getElementById('local-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    return;
-  }
+  if (node.is_me) { showLocalInDrawer(); return; }
   openPeerDrawer(node);
 });
 
@@ -1893,7 +1851,7 @@ function openPeerDrawer(node) {
   document.querySelectorAll('.node-row').forEach(r => r.classList.toggle('peer-selected', r.dataset.id === node.id));
   document.getElementById('peer-drawer-title').textContent = node.hostname + (node.ip ? '  ' + node.ip : '');
   document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading">FETCHING…</div>';
-  document.getElementById('peer-drawer').classList.add('open');
+  document.getElementById('side-panel').scrollTop = 0;
   if (!SIM.running) drawTopo();
   if (!node.ip) {
     document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
@@ -1902,11 +1860,12 @@ function openPeerDrawer(node) {
   fetchPeer(node.ip, node.hostname);
 }
 
-function closePeerDrawer() {
+function showLocalInDrawer() {
   SELECTED_PEER_ID = null;
   document.querySelectorAll('.node-row').forEach(r => r.classList.remove('peer-selected'));
-  document.getElementById('peer-drawer').classList.remove('open');
+  document.getElementById('side-panel').scrollTop = 0;
   if (!SIM.running) drawTopo();
+  fetchLocal();
 }
 
 async function fetchPeer(ip, hostname) {

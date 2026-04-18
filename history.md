@@ -230,3 +230,58 @@ Cilj: korisnik s mobitela može otvoriti admin panel bez znanja IP adrese, samo 
 - **Drag-to-resize panel**: na mobilnom uređaju između topology mape i info panela dodan je drag handle (pill ikona). Povlačenjem prema gore info panel se proširuje do cijelog ekrana. CSS media query na 768px prebacuje layout u column mode s `--topo-h` CSS varijablom.
 - **Pinch-to-zoom na mapi**: implementiran vlastiti pinch zoom i pan na canvas elementu. Zoom se vrši oko točke između prstiju (ispravna matematika: `view.x = cx - (cx - view.x) * (newScale / view.scale)`). Jedan prst = pan ili drag noda, dva prsta = zoom. Uklonjeno `maximum-scale=1` iz viewport meta taga.
 - **Fix: EUD AP interface false warnings**: GUI je prijavljivao wlan3 (EUD AP) kao "not in bat0" i "wpa_supplicant not running". Ispravak: učitava `/var/lib/no_mesh_if` pri health checku i isključuje te interface-e iz mesh/wpa_supplicant validacije. AP interface se klasificira kao `ap` role i provjerava samo hostapd/SSID status. wpa_supplicant nije potreban za AP mode (to vodi hostapd).
+
+---
+
+## 2026-04-18–19 (session 5) — branch `admin-panel-mdns`
+
+### Fix: manet.local nije radio (avahi hostname conflict + no IPv4 on wlan3)
+
+**Problem 1:** Svi nodovi dijele isti `br0` L2 broadcast domain (bat0 je bridge member od br0). Avahi konfig koristio `deny-interfaces=bat0,wlan0,wlan1,wlan2` što ostavlja `br0` aktivan — svi nodovi vide jedni druge-ove mDNS pakete pa avahi preimenova `manet` → `manet-2`, `manet-3`, `manet-4`.
+
+**Pokušaj 1:** Promijenjen na `allow-interfaces=wlan3` — ali `wlan3` je bridge slave i nema vlastitu IPv4 adresu pa avahi može objaviti samo IPv6 link-local, ne IPv4. EUD browser dobiva fe80:: i ne može otvoriti HTTP.
+
+**Konačno rješenje:** Dodan `address=/manet.local/<gateway_ip>` u dnsmasq config (`mesh-ip-manager.sh`). dnsmasq je već DNS server za EUD klijente (dhcp-option=6) i ima IPv4 gateway adresu noda. Svaki node odgovara na `manet.local` DNS upite s vlastitim IP-om — bez avahi, bez konflikata.
+
+**Izmjena u `mesh-ip-manager.sh`:** Dodano u dnsmasq template (`/etc/dnsmasq.d/mesh-eud.conf`):
+```
+address=/manet.local/$br0_secondary
+```
+
+**`radio-setup.sh` avahi fix:** Avahi config promijenjen s `deny-interfaces` na `allow-interfaces=<ap_if>` (čita iz `/var/lib/no_mesh_if`). Nije kritično jer dnsmasq rješava DNS, ali avahi više ne uzrokuje konflikt.
+
+**Deployjano live na sve 4 nodove** (mesh-eud.conf i avahi-daemon.conf ažurirani, dnsmasq restartan).
+
+### Admin panel: peer detail drawer refaktoriran
+
+**Staro ponašanje:** "THIS NODE" sekcija uvijek vidljiva na vrhu, drawer se otvara/zatvara klikom. Neighbor klik otvara drawer ispod headera.
+
+**Novo ponašanje:**
+- Drawer je uvijek otvoren — defaultno prikazuje lokalni node s "★ THIS NODE" u naslovu
+- Klik na neighbor (canvas ili lista) → drawer prikazuje neighbor podatke, fetchano kroz `/api/peer/<ip>`
+- Klik na centralni node (canvas) ili THIS NODE u listi → vraća na lokalni prikaz
+- Klik na bilo koji node → side-panel skrola na vrh automatski
+
+**Canvas highlight za selektirani node:**
+- Selektirani node dobiva bijeli border, pojačan glow (radijus 4.5× umjesto 3×, opacity 0.7 umjesto 0.3), i blagi fill
+- Lokalni (centralni) node je uvijek highlightan dok nije selektiran neighbor (jer je defaultno prikazan)
+- `isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID === n.id)`
+
+**Uklonjene komponente:** `local-toggle`, `local-panel`, `LOCAL_COLLAPSED`, `local-chevron`, `renderLocalPanel` → `peer-drawer-body`
+
+### Systemd unit nazivi (post-reprovisioning)
+
+Nakon reprovisioning-a s trenutnim tarbalijom:
+- `batman-enslave.service` (ne `batman-if-setup.service`)
+- `node-manager.service` (ne `node-manager-static.service`)
+
+### Node status (kraj session 5 — 2026-04-19)
+
+Svi 4 nodovi imaju ethernet u lab setupu. Mesh IP-ovi:
+
+| Hostname   | LAN IP         | Mesh IP (br0 secondary) |
+|------------|----------------|-------------------------|
+| mesh-7946  | 192.168.1.50   | 10.30.2.51              |
+| mesh-f86f  | 192.168.1.51   | 10.30.2.205             |
+| mesh-78f7  | 192.168.1.53   | 10.30.2.117             |
+| mesh-78f3  | 192.168.1.198  | 10.30.2.29              |

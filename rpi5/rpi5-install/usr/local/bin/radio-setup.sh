@@ -1465,6 +1465,11 @@ systemctl enable mesh-status
 apt install -y avahi-daemon 2>/dev/null || true
 install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
 cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
+# Restrict avahi to the AP-only interface so nodes on the mesh don't conflict on 'manet'
+AVAHI_AP_IF=$(head -1 /var/lib/no_mesh_if 2>/dev/null)
+if [ -n "$AVAHI_AP_IF" ]; then
+    sed -i "s/allow-interfaces=.*/allow-interfaces=$AVAHI_AP_IF/" /etc/avahi/avahi-daemon.conf
+fi
 cp /usr/local/share/manet/manet-http.service /etc/avahi/services/manet-http.service
 systemctl enable avahi-daemon
 systemctl restart avahi-daemon || true
