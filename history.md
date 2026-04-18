@@ -196,3 +196,26 @@ Ispravna provjera u radio-setup.sh: `grep -q '^dtparam=i2c_arm=on$'` (exact matc
 | mesh-7946 | ~37% | 14.543V | fast_charging |
 | mesh-78f7 | 69% | 15.357V | fast_charging |
 | mesh-78f3 | 58% | 15.208V | fast_charging |
+
+### Branch ups-battery-monitor mergean u master i obrisan
+
+---
+
+## Sljedeće — branch `admin-panel-mdns`
+
+Cilj: korisnik s mobitela može otvoriti admin panel bez znanja IP adrese, samo kroz `manet.local` hostname.
+
+### Kontekst
+
+- `mesh-status.py` sluša na portu **80** (konfigurirano u radio-setup.sh kao `ExecStart=... mesh-status.py 80`)
+- `avahi-daemon` se **uklanja** pri prvom provisioning-u (`apt remove -y network-manager avahi*`) — namjerno, zbog potencijalnih konflikata s mesh routingom
+- AP interface nije uvijek `wlan3` — ovisi o nodu, čita se iz `/var/lib/ap_interface` (runtime) i `/var/lib/no_mesh_if`
+- mDNS broadcast treba ići samo na AP interface, ne na mesh interfaces (wlan0/1/2, bat0, br0)
+
+### Plan
+
+Reinstalirati avahi-daemon ali s restriktivnom konfiguracijom:
+- `allow-interfaces=<AP_IFACE>` — samo AP interface
+- `deny-interfaces=bat0,br0,wlan0,wlan1,wlan2` — eksplicitno zabraniti mesh
+- Custom `.service` file koji broadcasta `manet` na portu 80
+- radio-setup.sh: ukloniti avahi iz `apt remove`, dodati avahi konfiguraciju i service file

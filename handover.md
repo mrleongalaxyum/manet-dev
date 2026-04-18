@@ -13,7 +13,7 @@
 
 batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Each node gets a `/24` chunk of `10.30.2.0/24` via `node-manager.sh` (alfred-based gossip). Only one node at a time has ethernet (`end0`) — that node becomes the mesh gateway (`batctl gw_mode server`), others route `default via bat0`.
 
-**Current active branch:** `ups-battery-monitor`
+**Current active branch:** `admin-panel-mdns`
 
 ---
 
@@ -91,7 +91,7 @@ ssh radio@10.30.2.182   # password: raspberry
 ## Repository and Scripts
 
 - **GitHub:** https://github.com/mrleongalaxyum/manet-dev (private)
-- **Active branch:** `ups-battery-monitor`
+- **Active branch:** `admin-panel-mdns`
 - `rpi5/rpi5-install/` — install package (all 4 nodes provisioned from this)
 - `rpi5/rpi5-live/78f3/` and `rpi5/rpi5-live/78f7/` — live script snapshots from nodes (taken 2026-04-17, before full reprovision — for reference only)
 - `rpi5/rpi5-install.tar.gz` — built tarball, uploaded to Ventum (`/manet/rpi5/rpi5-install.tar.gz`) and available on Colorado SFTP (`/rpi5/rpi5-install.tar.gz`)
@@ -119,6 +119,10 @@ ssh radio@10.30.2.182   # password: raspberry
 - `/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf` — HaLow S1G, `country="EU"` (quoted), `op_class=66`, `channel=5` (865.5 MHz)
 - `/etc/modprobe.d/morse.conf` — morse driver options including `country=EU`
 - `/etc/modprobe.d/cfg80211.conf` — `options cfg80211 ieee80211_regdom=EU`
+
+### AP interface
+
+AP interface (non-mesh, for EUD hotspot) varies per node — stored at runtime in `/var/lib/ap_interface`. Non-mesh interfaces listed in `/var/lib/no_mesh_if`. Do **not** assume `wlan3` — always read from these files. Relevant for mDNS: avahi should only broadcast on the AP interface, not on mesh interfaces.
 
 ### Known live deviations from repo (as of 2026-04-18)
 
