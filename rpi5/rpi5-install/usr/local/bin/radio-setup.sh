@@ -1459,23 +1459,26 @@ systemctl enable mesh-status
 # === UPS HAT (E) BATTERY MONITOR ===
 # ============================================================================
 
-# Enable I2C for battery fuel gauge (Waveshare UPS HAT E — INA219 at 0x40)
-if grep -q 'dtparam=i2c_arm=off' /boot/firmware/config.txt 2>/dev/null; then
-    sed -i 's/dtparam=i2c_arm=off/dtparam=i2c_arm=on/' /boot/firmware/config.txt
-    echo " > I2C enabled in /boot/firmware/config.txt (was off)"
-elif ! grep -q 'dtparam=i2c_arm' /boot/firmware/config.txt 2>/dev/null; then
-    echo "dtparam=i2c_arm=on" >> /boot/firmware/config.txt
-    echo " > I2C enabled in /boot/firmware/config.txt (was absent)"
-fi
+# Enable I2C for battery fuel gauge (Waveshare UPS HAT E — IP2368 MCU at 0x2D)
+# Bookworm+: /boot/firmware/config.txt; older images: /boot/config.txt
+for _cfg in /boot/firmware/config.txt /boot/config.txt; do
+    [ -f "$_cfg" ] || continue
+    if ! grep -q '^dtparam=i2c_arm=on$' "$_cfg"; then
+        # Remove any existing i2c_arm line then append the correct one
+        sed -i '/^dtparam=i2c_arm/d' "$_cfg"
+        echo "dtparam=i2c_arm=on" >> "$_cfg"
+        echo " > I2C enabled in $_cfg"
+    fi
+done
 
-# RPi5 uses i2c_designware — the i2c-dev kernel module must be loaded for /dev/i2c-1
-if ! grep -q 'i2c-dev' /etc/modules 2>/dev/null; then
+# RPi5 uses i2c_designware — i2c-dev module must load at boot for /dev/i2c-1
+if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
     echo 'i2c-dev' >> /etc/modules
     echo " > i2c-dev added to /etc/modules"
 fi
 
-# Install smbus library for battery-reader.py
-apt-get install -y python3-smbus 2>/dev/null || true
+# Install smbus and i2c-tools for battery-reader.py and diagnostics
+apt-get install -y python3-smbus i2c-tools 2>/dev/null || true
 
 systemctl enable battery-reader.service
 
