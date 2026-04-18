@@ -1444,10 +1444,12 @@ function drawTopo() {
     ctx.textBaseline = 'alphabetic';
 
     // Label
-    ctx.fillStyle = isHover ? '#ffffff' : col + 'cc';
-    ctx.font = `${isHover ? 'bold ' : ''}11px "Courier New"`;
+    const isSelected = SELECTED_PEER_ID && SELECTED_PEER_ID === n.id;
+    ctx.fillStyle = isHover || isSelected ? '#ffffff' : col + 'cc';
+    ctx.font = `${isHover || isSelected ? 'bold ' : ''}11px "Courier New"`;
     ctx.textAlign = 'center';
-    ctx.fillText(n.hostname, n.x, n.y + r + 12);
+    const label = n.hostname + (isSelected ? ' (de)' : '');
+    ctx.fillText(label, n.x, n.y + r + 12);
   });
 }
 
@@ -1892,6 +1894,7 @@ function openPeerDrawer(node) {
   document.getElementById('peer-drawer-title').textContent = node.hostname + (node.ip ? '  ' + node.ip : '');
   document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading">FETCHING…</div>';
   document.getElementById('peer-drawer').classList.add('open');
+  if (!SIM.running) drawTopo();
   if (!node.ip) {
     document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
     return;
@@ -1903,6 +1906,7 @@ function closePeerDrawer() {
   SELECTED_PEER_ID = null;
   document.querySelectorAll('.node-row').forEach(r => r.classList.remove('peer-selected'));
   document.getElementById('peer-drawer').classList.remove('open');
+  if (!SIM.running) drawTopo();
 }
 
 async function fetchPeer(ip, hostname) {
