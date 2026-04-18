@@ -299,6 +299,14 @@ def get_interfaces():
     conf     = load_kv_file(MESH_CONF_FILE)
     eud_mode = conf.get('eud', 'wired')
 
+    # Non-mesh interfaces (EUD AP) — must not be checked for bat0/wpa_supplicant
+    no_mesh_ifaces = set()
+    try:
+        with open('/var/lib/no_mesh_if') as f:
+            no_mesh_ifaces = {l.strip() for l in f if l.strip()}
+    except Exception:
+        pass
+
     # Build a set of all iface names present for cross-referencing
     all_names = {d.get('ifname', '') for d in raw}
 
@@ -342,7 +350,12 @@ def get_interfaces():
                 health = 'warn'
                 faults.append('No IP assigned')
 
-        elif name in bat0_all_slaves or (name.startswith('wlan') and name not in iw_info.get(name, {}) and name not in [d.get('ifname') for d in raw if d.get('master') == 'bat0']):
+        elif name in bat0_all_slaves or (
+            name.startswith('wlan') and
+            name not in no_mesh_ifaces and
+            iw.get('type') != 'AP' and
+            name not in [d.get('ifname') for d in raw if d.get('master') == 'bat0']
+        ):
             # Mesh radio
             role = 'mesh'
             freq = iw.get('freq', '')
@@ -361,12 +374,12 @@ def get_interfaces():
                 health = 'warn'
                 faults.append(f'Not active in bat0')
 
-            # Check wpa_supplicant
+            # wpa_supplicant check only for mesh radios (not AP/no_mesh)
             if name not in wpa_running:
                 if health == 'ok': health = 'warn'
                 faults.append(f'wpa_supplicant not running for {name}')
 
-        elif iw.get('type') == 'AP':
+        elif iw.get('type') == 'AP' or name in no_mesh_ifaces:
             role = 'ap'
             ssid = iw.get('ssid', '')
             freq = iw.get('freq', '')
@@ -401,7 +414,7 @@ def get_interfaces():
                 health = 'info'
                 detail += ' (no cable)' if not detail.endswith(')') else ''
 
-        elif name.startswith('wlan') or name.startswith(('halow', 'mlan')):
+        elif (name.startswith('wlan') or name.startswith(('halow', 'mlan'))) and name not in no_mesh_ifaces:
             # wlan not in bat0 and not AP — unexpected
             freq = iw.get('freq', '')
             detail = f"Wireless {freq}GHz" if freq else 'Wireless'
@@ -926,10 +939,35 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; letter-spacing: 2px; }
 
 /* ── Responsive: narrow → stack ── */
-@media (max-width: 600px) {
+@media (max-width: 768px) {
   #main { flex-direction: column; }
-  #topo-panel { min-height: 50vh; }
-  #side-panel { width: 100%; height: auto; max-height: 50vh; border-left: none; border-top: 1px solid var(--border); }
+  #topo-panel { height: var(--topo-h, 50vh); min-height: 80px; flex: none; }
+  #side-panel { width: 100%; flex: 1; overflow-y: auto; border-left: none; border-top: none; }
+}
+@media (min-width: 769px) {
+  #drag-handle { display: none; }
+}
+#drag-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  cursor: row-resize;
+  flex-shrink: 0;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#drag-handle::before {
+  content: '';
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--muted);
+  opacity: 0.6;
 }
 """
 
@@ -937,7 +975,7 @@ STATUS_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MANET Node</title>
 <style>__CSS__</style>
 </head>
@@ -966,6 +1004,7 @@ STATUS_HTML = r"""<!DOCTYPE html>
       <canvas id="topo"></canvas>
       <div id="loading">LOADING TOPOLOGY…</div>
     </div>
+    <div id="drag-handle"></div>
     <div id="side-panel">
       <div class="section-hdr" id="local-toggle" style="cursor:pointer;user-select:none;">
         THIS NODE <span id="local-chevron">▾</span>
@@ -1232,14 +1271,18 @@ function simStep() {
   });
 }
 
+const view = { x: 0, y: 0, scale: 1 };
+
 function drawTopo() {
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.offsetWidth, H = canvas.offsetHeight;
   canvas.width  = W * dpr;
   canvas.height = H * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.translate(view.x, view.y);
+  ctx.scale(view.scale, view.scale);
 
-  ctx.clearRect(0, 0, W, H);
+  ctx.clearRect(-view.x / view.scale, -view.y / view.scale, W / view.scale, H / view.scale);
 
   if (SIM.nodes.length === 0) return;
 
@@ -1394,10 +1437,15 @@ function startSim(data) {
   setTimeout(() => { SIM.running = false; }, 4000);
 }
 
+// Convert screen coords to canvas/simulation coords
+function screenToSim(sx, sy) {
+  return { x: (sx - view.x) / view.scale, y: (sy - view.y) / view.scale };
+}
+
 // ── Tooltip ───────────────────────────────────────────────────────────────────
 canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const { x: mx, y: my } = screenToSim(e.clientX - rect.left, e.clientY - rect.top);
   HOVER_NODE = SIM.nodes.find(n => {
     const dx = n.x - mx, dy = n.y - my;
     return Math.sqrt(dx*dx + dy*dy) < n.r + 8;
@@ -1429,31 +1477,113 @@ canvas.addEventListener('mouseleave', () => {
   if (!SIM.running) drawTopo();
 });
 
-// Touch pan/drag (phone)
+// ── Touch: pinch-to-zoom + pan + node drag ────────────────────────────────────
 let dragNode = null, dragOX = 0, dragOY = 0;
+let lastPanX = 0, lastPanY = 0, isPanning = false;
+let pinchDist0 = 0, pinchScale0 = 1, pinchCX = 0, pinchCY = 0;
+
+function getTouchDist(touches) {
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.sqrt(dx*dx + dy*dy);
+}
+function getTouchCenter(touches, rect) {
+  return {
+    x: (touches[0].clientX + touches[1].clientX) / 2 - rect.left,
+    y: (touches[0].clientY + touches[1].clientY) / 2 - rect.top,
+  };
+}
+
 canvas.addEventListener('touchstart', e => {
   const rect = canvas.getBoundingClientRect();
-  const t = e.touches[0];
-  const mx = t.clientX - rect.left, my = t.clientY - rect.top;
-  dragNode = SIM.nodes.find(n => {
-    const dx = n.x - mx, dy = n.y - my;
-    return Math.sqrt(dx*dx + dy*dy) < n.r + 12;
-  }) || null;
-  if (dragNode) { dragOX = mx - dragNode.x; dragOY = my - dragNode.y; e.preventDefault(); }
+  if (e.touches.length === 1) {
+    const t = e.touches[0];
+    const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
+    const { x: mx, y: my } = screenToSim(sx, sy);
+    dragNode = SIM.nodes.find(n => {
+      const dx = n.x - mx, dy = n.y - my;
+      return Math.sqrt(dx*dx + dy*dy) < n.r + 12;
+    }) || null;
+    if (dragNode) {
+      dragOX = mx - dragNode.x; dragOY = my - dragNode.y;
+    } else {
+      isPanning = true; lastPanX = sx; lastPanY = sy;
+    }
+    e.preventDefault();
+  } else if (e.touches.length === 2) {
+    dragNode = null; isPanning = false;
+    pinchDist0  = getTouchDist(e.touches);
+    pinchScale0 = view.scale;
+    const c = getTouchCenter(e.touches, rect);
+    pinchCX = c.x; pinchCY = c.y;
+    e.preventDefault();
+  }
 }, { passive: false });
 
 canvas.addEventListener('touchmove', e => {
-  if (!dragNode) return;
   const rect = canvas.getBoundingClientRect();
-  const t = e.touches[0];
-  dragNode.x  = t.clientX - rect.left - dragOX;
-  dragNode.y  = t.clientY - rect.top  - dragOY;
-  dragNode.vx = 0; dragNode.vy = 0;
-  if (!SIM.running) drawTopo();
-  e.preventDefault();
+  if (e.touches.length === 2) {
+    // Pinch zoom
+    const dist   = getTouchDist(e.touches);
+    const newScale = Math.min(Math.max(pinchScale0 * (dist / pinchDist0), 0.3), 5);
+    // Zoom around pinch center
+    view.x = pinchCX - (pinchCX - view.x) * (newScale / view.scale);
+    view.y = pinchCY - (pinchCY - view.y) * (newScale / view.scale);
+    view.scale = newScale;
+    if (!SIM.running) drawTopo();
+    e.preventDefault();
+  } else if (e.touches.length === 1) {
+    const t = e.touches[0];
+    const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
+    if (dragNode) {
+      const { x: mx, y: my } = screenToSim(sx, sy);
+      dragNode.x = mx - dragOX; dragNode.y = my - dragOY;
+      dragNode.vx = 0; dragNode.vy = 0;
+    } else if (isPanning) {
+      view.x += sx - lastPanX; view.y += sy - lastPanY;
+      lastPanX = sx; lastPanY = sy;
+    }
+    if (!SIM.running) drawTopo();
+    e.preventDefault();
+  }
 }, { passive: false });
 
-canvas.addEventListener('touchend', () => { dragNode = null; });
+canvas.addEventListener('touchend', e => {
+  if (e.touches.length < 2) { pinchDist0 = 0; }
+  if (e.touches.length === 0) { dragNode = null; isPanning = false; }
+});
+
+// ── Panel drag-to-resize (mobile) ────────────────────────────────────────────
+(function () {
+  const handle = document.getElementById('drag-handle');
+  const main   = document.getElementById('main');
+  let dragging = false, startY = 0, startH = 0;
+
+  function onStart(y) {
+    dragging = true;
+    startY   = y;
+    startH   = document.getElementById('topo-panel').getBoundingClientRect().height;
+    document.body.style.userSelect = 'none';
+  }
+  function onMove(y) {
+    if (!dragging) return;
+    const mainH  = main.getBoundingClientRect().height;
+    const newH   = Math.min(Math.max(startH + (y - startY), 80), mainH - 60);
+    document.documentElement.style.setProperty('--topo-h', newH + 'px');
+    if (!SIM.running) drawTopo();
+  }
+  function onEnd() {
+    dragging = false;
+    document.body.style.userSelect = '';
+  }
+
+  handle.addEventListener('touchstart', e => { onStart(e.touches[0].clientY); e.preventDefault(); }, { passive: false });
+  handle.addEventListener('touchmove',  e => { onMove(e.touches[0].clientY);  e.preventDefault(); }, { passive: false });
+  handle.addEventListener('touchend',   onEnd);
+  handle.addEventListener('mousedown',  e => onStart(e.clientY));
+  window.addEventListener('mousemove',  e => onMove(e.clientY));
+  window.addEventListener('mouseup',    onEnd);
+})();
 
 // ── Resize ────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
@@ -1721,7 +1851,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MANET Admin</title>
 <style>__CSS__
 body { overflow-y: auto; }
