@@ -1456,6 +1456,33 @@ EOF
 systemctl enable mesh-status
 
 # ============================================================================
+# === UPS HAT (E) BATTERY MONITOR ===
+# ============================================================================
+
+# Enable I2C for battery fuel gauge (Waveshare UPS HAT E — IP2368 MCU at 0x2D)
+# Bookworm+: /boot/firmware/config.txt; older images: /boot/config.txt
+for _cfg in /boot/firmware/config.txt /boot/config.txt; do
+    [ -f "$_cfg" ] || continue
+    if ! grep -q '^dtparam=i2c_arm=on$' "$_cfg"; then
+        # Remove any existing i2c_arm line then append the correct one
+        sed -i '/^dtparam=i2c_arm/d' "$_cfg"
+        echo "dtparam=i2c_arm=on" >> "$_cfg"
+        echo " > I2C enabled in $_cfg"
+    fi
+done
+
+# RPi5 uses i2c_designware — i2c-dev module must load at boot for /dev/i2c-1
+if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
+    echo 'i2c-dev' >> /etc/modules
+    echo " > i2c-dev added to /etc/modules"
+fi
+
+# Install smbus and i2c-tools for battery-reader.py and diagnostics
+apt update -qq && apt install -y python3-smbus i2c-tools || true
+
+systemctl enable battery-reader.service
+
+# ============================================================================
 # === FIRST RUN vs RE-RUN ===
 # ============================================================================
 
