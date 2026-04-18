@@ -60,10 +60,10 @@ Also mirrored on Colorado SFTP: `/rpi5/rpi5-install.tar.gz`
 
 | WAN Port | Local IP       | Hostname  | SSH Port | Mesh IPs        | Notes          |
 |----------|----------------|-----------|----------|-----------------|----------------|
-| 3254     | 192.168.1.198  | mesh-78f3 | 22       | 10.30.2.x       | has ethernet   |
-| 3255     | 192.168.1.51   | mesh-f86f | 22       | 10.30.2.160/161 | has ethernet   |
-| 3256     | 192.168.1.53   | mesh-78f7 | 22       | 10.30.2.182/183 | has ethernet   |
-| 3257     | 192.168.1.50   | mesh-7946 | 22       | 10.30.2.72/73   | has ethernet   |
+| 3254     | 192.168.1.198  | mesh-78f3 | 22       | 10.30.2.28      | has ethernet   |
+| 3255     | 192.168.1.51   | mesh-f86f | 22       | 10.30.2.204     | has ethernet   |
+| 3256     | 192.168.1.53   | mesh-78f7 | 22       | 10.30.2.116     | has ethernet   |
+| 3257     | 192.168.1.50   | mesh-7946 | 22       | 10.30.2.50      | has ethernet   |
 
 - **User:** radio
 - **Password:** raspberry
@@ -79,8 +79,9 @@ ssh radio@192.168.1.198  # mesh-78f3
 
 If a node is mesh-only (no ethernet), jump via a node that has ethernet:
 ```bash
-ssh -J radio@192.168.1.50 radio@10.30.2.182   # reach mesh-78f7 via mesh
-ssh -J radio@192.168.1.50 radio@10.30.2.160   # reach mesh-f86f via mesh
+ssh -J radio@192.168.1.53 radio@10.30.2.204   # reach mesh-f86f via mesh-78f7
+ssh -J radio@192.168.1.53 radio@10.30.2.50    # reach mesh-7946 via mesh-78f7
+ssh -J radio@192.168.1.53 radio@10.30.2.28    # reach mesh-78f3 via mesh-78f7
 ```
 
 ---
