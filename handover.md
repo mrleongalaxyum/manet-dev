@@ -134,6 +134,12 @@ Every node advertises itself as `manet.local` via avahi-daemon. EUD clients conn
 - avahi was previously removed in provisioning — now kept, but mesh interfaces are denied
 - Source files in tarball: `usr/local/share/manet/avahi-daemon.conf` and `manet-http.service`
 
+### Admin panel (mesh-status.py) — mobile UX
+
+- **Drag handle**: visible pill between topology canvas and info panel on mobile (≤768px). Drag up to expand info panel to full screen. CSS var `--topo-h` controls canvas height.
+- **Pinch-to-zoom**: canvas supports pinch zoom (0.3×–5×) and pan. One finger = pan or node drag, two fingers = zoom around midpoint. `maximum-scale=1` removed from viewport meta.
+- **EUD AP health**: `/var/lib/no_mesh_if` is read at runtime to exclude AP interfaces from bat0/wpa_supplicant checks. AP interfaces are classified as `ap` role — only hostapd/SSID status is checked. wpa_supplicant is not needed for AP mode.
+
 ### Known live deviations from repo (as of 2026-04-18)
 
 - **wpa_supplicant@wlan0 and wpa_supplicant@wlan1 are stopped** on all nodes — temporary dev state for HaLow-only testing. Not a persistent config change. Re-enable with `systemctl start wpa_supplicant@wlan0 wpa_supplicant@wlan1`.

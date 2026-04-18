@@ -224,3 +224,9 @@ Cilj: korisnik s mobitela može otvoriti admin panel bez znanja IP adrese, samo 
 - Konfig fajlovi u tarbalu: `usr/local/share/manet/avahi-daemon.conf` i `manet-http.service`
 
 **Testirano:** mobitel spojen na AP od mesh-78f3 uspješno otvara `http://manet.local`.
+
+### Admin panel GUI poboljšanja (branch `admin-panel-mdns`)
+
+- **Drag-to-resize panel**: na mobilnom uređaju između topology mape i info panela dodan je drag handle (pill ikona). Povlačenjem prema gore info panel se proširuje do cijelog ekrana. CSS media query na 768px prebacuje layout u column mode s `--topo-h` CSS varijablom.
+- **Pinch-to-zoom na mapi**: implementiran vlastiti pinch zoom i pan na canvas elementu. Zoom se vrši oko točke između prstiju (ispravna matematika: `view.x = cx - (cx - view.x) * (newScale / view.scale)`). Jedan prst = pan ili drag noda, dva prsta = zoom. Uklonjeno `maximum-scale=1` iz viewport meta taga.
+- **Fix: EUD AP interface false warnings**: GUI je prijavljivao wlan3 (EUD AP) kao "not in bat0" i "wpa_supplicant not running". Ispravak: učitava `/var/lib/no_mesh_if` pri health checku i isključuje te interface-e iz mesh/wpa_supplicant validacije. AP interface se klasificira kao `ap` role i provjerava samo hostapd/SSID status. wpa_supplicant nije potreban za AP mode (to vodi hostapd).
