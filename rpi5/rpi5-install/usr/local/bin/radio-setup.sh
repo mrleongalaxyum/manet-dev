@@ -1478,7 +1478,7 @@ if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
 fi
 
 # Install smbus and i2c-tools for battery-reader.py and diagnostics
-apt-get install -y python3-smbus i2c-tools 2>/dev/null || true
+apt-get update -qq && apt-get install -y python3-smbus i2c-tools || true
 
 systemctl enable battery-reader.service
 
