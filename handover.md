@@ -44,18 +44,15 @@ sftp -i .ssh/colorado-manet-key -P 11238 clanker@www.colorado-governor.com
 
 ---
 
-## Ventum Upload Server
+## Tarball distribution
 
-- **URL:** https://manet.ventum.hr/upload/
-- **User:** clanker
-- **Password:** really-strong-password-321
+Tarball releases are published as GitHub Release artifacts:
+- **Latest:** https://github.com/mrleongalaxyum/manet-dev/releases/latest
+- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.4-admin-panel-mdns
 
-**Upload example:**
-```bash
-curl -u clanker:really-strong-password-321 -T <file> https://manet.ventum.hr/upload/rpi5/<file>
-```
+Also mirrored on Colorado SFTP: `/rpi5/rpi5-install.tar.gz`
 
-**Local server:** 192.168.1.131, user: leon, password: hobbyking. Files are served from `~/Desktop/MANET/manet/` inside a Docker nginx container. The `/upload/` endpoint maps to that same directory.
+**Local server (backup):** 192.168.1.131, user: leon, password: hobbyking. Files served from `~/Desktop/MANET/manet/` via Docker nginx. Upload: `curl -u clanker:really-strong-password-321 -T <file> https://manet.ventum.hr/upload/rpi5/<file>`
 
 ---
 
@@ -185,7 +182,7 @@ Building from the parent directory creates a prefix folder and scripts end up at
 ### Provisioning a new node
 
 1. Flash SD with base Raspberry Pi OS image
-2. Download tarball from Ventum: `curl -u clanker:really-strong-password-321 https://manet.ventum.hr/upload/rpi5/rpi5-install.tar.gz | tar -xzf - -C /`
+2. Download tarball from GitHub releases: `curl -L https://github.com/mrleongalaxyum/manet-dev/releases/latest/download/rpi5-install.tar.gz | tar -xzf - -C /`
 3. Edit `/etc/mesh.conf` with node-specific settings (especially `regulatory_domain`, `halow_regulatory_domain`)
 4. Run `/usr/local/bin/radio-setup.sh` (or reboot if firstrun service is enabled)
 
