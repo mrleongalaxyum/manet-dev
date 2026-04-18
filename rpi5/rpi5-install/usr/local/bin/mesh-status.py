@@ -2591,7 +2591,7 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 return
             try:
                 import urllib.request
-                url = f'http://{peer_ip}:8080/api/local'
+                url = f'http://{peer_ip}:{PORT}/api/local'
                 req = urllib.request.Request(url, headers={'User-Agent': 'manet-proxy/1'})
                 with urllib.request.urlopen(req, timeout=4) as resp:
                     data = json.loads(resp.read().decode())
