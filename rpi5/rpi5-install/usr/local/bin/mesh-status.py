@@ -1087,7 +1087,6 @@ function renderNodeList(nodes) {
     ].filter(Boolean).join(' ');
 
     const badges = [];
-    if (n.is_me)       badges.push(`<span class="badge badge-tq-great">THIS NODE</span>`);
     if (n.is_gateway)  badges.push(`<span class="badge badge-gw">${n.is_selected_gw ? '★ GW' : 'GW'}</span>`);
     if (n.is_direct && !n.is_me) badges.push(`<span class="badge badge-direct">DIRECT</span>`);
     if (n.mumble)      badges.push(`<span class="badge badge-svc">MUMBLE</span>`);
@@ -1095,6 +1094,9 @@ function renderNodeList(nodes) {
     if (n.ntp)         badges.push(`<span class="badge badge-svc">NTP</span>`);
     if (n.limp)        badges.push(`<span class="badge badge-tq-bad">LIMP</span>`);
 
+    const thisNodeLabel = n.is_me
+      ? `<span style="background:var(--self);color:#fff;font-size:10px;font-weight:bold;padding:1px 7px;border-radius:3px;letter-spacing:.8px;margin-left:6px">THIS NODE</span>`
+      : '';
     const tqBadge = `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
     const bar = `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
     const meta = n.uptime  ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
@@ -1108,7 +1110,7 @@ function renderNodeList(nodes) {
     }
 
     return `<div class="${cls}" data-id="${n.id}">
-      <div class="node-name">${n.hostname}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px">OFFLINE</span>':''}</div>
+      <div class="node-name">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
       <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
       <div class="node-meta">${tqBadge}${badges.join('')}${meta}${cpu}${battMeta}</div>
       ${bar}
@@ -1507,7 +1509,16 @@ canvas.addEventListener('click', e => {
     return Math.sqrt(dx*dx + dy*dy) < n.r + 10;
   });
   if (!hit) return;
-  if (hit.is_me) { closePeerDrawer(); return; }
+  if (hit.is_me) {
+    closePeerDrawer();
+    if (LOCAL_COLLAPSED) {
+      LOCAL_COLLAPSED = false;
+      document.getElementById('local-panel').style.display = '';
+      document.getElementById('local-chevron').textContent = '▾';
+    }
+    document.getElementById('local-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
   // Sync selection with node list
   const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
   if (listRow) listRow.scrollIntoView({ block: 'nearest' });
@@ -1801,7 +1812,17 @@ document.getElementById('node-list').addEventListener('click', e => {
   if (!id || !DATA) return;
   const node = DATA.nodes.find(n => n.id === id);
   if (!node) return;
-  if (node.is_me) { closePeerDrawer(); return; }
+  if (node.is_me) {
+    closePeerDrawer();
+    // Scroll to and expand local panel
+    if (LOCAL_COLLAPSED) {
+      LOCAL_COLLAPSED = false;
+      document.getElementById('local-panel').style.display = '';
+      document.getElementById('local-chevron').textContent = '▾';
+    }
+    document.getElementById('local-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
   openPeerDrawer(node);
 });
 
