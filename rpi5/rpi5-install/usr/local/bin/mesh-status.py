@@ -922,6 +922,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
                background:#ef444420; color:var(--bad); margin-left:6px; vertical-align:middle; }
 .warn-count  { display:inline-block; padding:1px 5px; border-radius:3px; font-size:10px;
                background:#f9731620; color:var(--warn); margin-left:6px; vertical-align:middle; }
+/* ── Peer Detail Drawer ── */
+#peer-drawer { display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
+               background: var(--surface); border-top: 2px solid var(--accent);
+               max-height: 60vh; overflow-y: auto; padding-bottom: env(safe-area-inset-bottom,0); }
+#peer-drawer.open { display: block; }
+#peer-drawer-hdr { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+                   border-bottom: 1px solid var(--border); background: #0d1520; position: sticky; top: 0; z-index: 1; }
+#peer-drawer-title { flex: 1; font-size: 13px; font-weight: bold; color: var(--accent); }
+#peer-drawer-close { background: none; border: none; color: var(--muted); font-size: 18px;
+                     cursor: pointer; line-height: 1; padding: 0 4px; }
+#peer-drawer-close:hover { color: var(--text); }
+#peer-drawer-body { padding: 0; }
+.peer-loading { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; letter-spacing: 1px; }
+.node-row.peer-selected { background: #1a2535; outline: 1px solid var(--accent); outline-offset: -1px; }
 .eud-row { padding: 4px 10px; border-bottom: 1px solid #1e304820; font-size: 11px; }
 .eud-row:last-child { border-bottom: none; }
 .eud-name { color: var(--text); }
@@ -1018,6 +1032,14 @@ STATUS_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 <div id="tooltip"></div>
+
+<div id="peer-drawer">
+  <div id="peer-drawer-hdr">
+    <span id="peer-drawer-title">—</span>
+    <button id="peer-drawer-close" onclick="closePeerDrawer()">✕</button>
+  </div>
+  <div id="peer-drawer-body"><div class="peer-loading">Loading…</div></div>
+</div>
 
 <script>
 // ── Data & State ────────────────────────────────────────────────────────────
@@ -1753,6 +1775,133 @@ fetchData();
 fetchLocal();
 setInterval(fetchData, POLL_INTERVAL_MS);
 setInterval(fetchLocal, POLL_INTERVAL_MS);
+
+// ── Peer Detail Drawer ────────────────────────────────────────────────────────
+let SELECTED_PEER_ID = null;
+
+document.getElementById('node-list').addEventListener('click', e => {
+  const row = e.target.closest('.node-row');
+  if (!row) return;
+  const id = row.dataset.id;
+  if (!id || !DATA) return;
+  const node = DATA.nodes.find(n => n.id === id);
+  if (!node) return;
+  if (node.is_me) { closePeerDrawer(); return; }
+  openPeerDrawer(node);
+});
+
+function openPeerDrawer(node) {
+  SELECTED_PEER_ID = node.id;
+  document.querySelectorAll('.node-row').forEach(r => r.classList.toggle('peer-selected', r.dataset.id === node.id));
+  document.getElementById('peer-drawer-title').textContent = node.hostname + (node.ip ? '  ' + node.ip : '');
+  document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading">FETCHING…</div>';
+  document.getElementById('peer-drawer').classList.add('open');
+  if (!node.ip) {
+    document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
+    return;
+  }
+  fetchPeer(node.ip, node.hostname);
+}
+
+function closePeerDrawer() {
+  SELECTED_PEER_ID = null;
+  document.querySelectorAll('.node-row').forEach(r => r.classList.remove('peer-selected'));
+  document.getElementById('peer-drawer').classList.remove('open');
+}
+
+async function fetchPeer(ip, hostname) {
+  try {
+    const r = await fetch('/api/peer/' + ip);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.status);
+    renderPeerDrawer(d, hostname);
+  } catch (err) {
+    document.getElementById('peer-drawer-body').innerHTML =
+      '<div class="peer-loading" style="color:var(--bad)">Error: ' + err.message + '</div>';
+  }
+}
+
+function renderPeerDrawer(d, hostname) {
+  let html = '';
+
+  // Battery
+  let battHtml = '—';
+  if (d.battery != null) {
+    const b = d.battery, pct = b.percentage, col = battColor(pct);
+    const icon = b.charging === true ? ' ⚡' : (pct <= 15 ? ' ⚠' : '');
+    let extra = '';
+    if (b.voltage_v != null) {
+      const mAstr = b.current_ma != null ? ` ${b.current_ma > 0 ? '+' : ''}${b.current_ma}mA` : '';
+      const mWstr = b.power_w   != null ? ` ${b.power_w}W` : '';
+      const stIcon = b.status === 'charging' ? ' ⚡' : '';
+      extra = `<span style="font-size:9px;color:var(--muted)"> ${b.voltage_v.toFixed(3)}V${mAstr}${mWstr}${stIcon}</span>`;
+    }
+    battHtml = `${pct}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${pct}%;background:${col}"></span></span>${icon}${extra}`;
+  }
+
+  const rows = [
+    ['Hostname', d.hostname || '—'],
+    ['Mesh IP',  d.ip       || '—'],
+    ['Uptime',   d.uptime   || '—'],
+    ['Battery',  battHtml],
+    ['EUD Mode', d.eud_mode || '—'],
+  ];
+  if (d.ap_ssid) rows.push(['AP SSID', d.ap_ssid]);
+
+  html += rows.map(([label, val]) =>
+    `<div class="local-row"><span class="local-label">${label}</span><span class="local-val">${val}</span></div>`
+  ).join('');
+
+  // Interfaces
+  if (d.interfaces && d.interfaces.length) {
+    const faults = d.interfaces.filter(i => i.health === 'fault').length;
+    const warns  = d.interfaces.filter(i => i.health === 'warn').length;
+    let hdr = `<div class="section-hdr" style="font-size:9px;position:static">INTERFACES`;
+    if (faults) hdr += `<span class="fault-count">⚠ ${faults} FAULT${faults>1?'S':''}</span>`;
+    else if (warns) hdr += `<span class="warn-count">⚠ ${warns} WARN${warns>1?'S':''}</span>`;
+    hdr += `</div>`;
+    html += hdr;
+    const roleLabel = { bat:'BATMAN', mesh:'MESH', ap:'EUD AP', gateway:'GATEWAY', 'eud-bridge':'EUD', bridge:'BRIDGE', other:'' };
+    html += d.interfaces.map(iface => {
+      const label = roleLabel[iface.role] || iface.role.toUpperCase();
+      const sc = iface.state === 'UP' ? 'up' : iface.state === 'DOWN' ? 'down' : 'unknown';
+      const addrs = iface.addrs && iface.addrs.length ? `<div class="iface-addrs">${iface.addrs.join(' &nbsp; ')}</div>` : '';
+      const faultLines = (iface.faults || []).map(f => `<div class="${iface.health==='fault'?'iface-fault':'iface-warn'}">${f}</div>`).join('');
+      return `<div class="iface-row health-${iface.health}">
+        <div class="iface-header">
+          <span class="iface-name">${iface.name}</span>
+          <span class="iface-state iface-state-${sc}">${iface.state||'?'}</span>
+          ${label ? `<span class="iface-role role-${iface.role}">${label}</span>` : ''}
+        </div>
+        ${iface.detail ? `<div class="iface-detail">${iface.detail}</div>` : ''}
+        ${addrs}${faultLines}
+      </div>`;
+    }).join('');
+  }
+
+  // Connected EUDs
+  html += `<div class="section-hdr" style="font-size:9px;position:static">CONNECTED EUDS (${d.euds ? d.euds.length : 0})</div>`;
+  if (d.euds && d.euds.length) {
+    html += d.euds.map(e => `<div class="eud-row">
+      <span class="eud-name">${e.hostname || '<i style="color:var(--muted)">unknown</i>'}</span>
+      &nbsp;<span class="eud-ip">${e.ip}</span>
+      <div class="eud-mac">${e.mac}</div></div>`).join('');
+  } else {
+    html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">None</div>`;
+  }
+
+  // Services
+  html += `<div class="section-hdr" style="font-size:9px;position:static">SERVICES</div>`;
+  const svcLabels = { mumble:'Mumble', mediamtx:'MediaMTX', ntp:'NTP', syncthing:'Syncthing', tak:'TAK' };
+  html += `<div class="svc-grid">`;
+  for (const [key, label] of Object.entries(svcLabels)) {
+    const on = d.services && d.services[key];
+    html += `<span class="svc-pill ${on?'svc-on':'svc-off'}">${label}</span>`;
+  }
+  html += `</div>`;
+
+  document.getElementById('peer-drawer-body').innerHTML = html;
+}
 </script>
 </body>
 </html>"""
@@ -2429,6 +2578,29 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(500)
                 self.end_headers()
                 self.wfile.write(str(e).encode())
+
+        elif path.startswith('/api/peer/'):
+            peer_ip = path[len('/api/peer/'):]
+            # Validate: must look like an IP address
+            try:
+                ipaddress.ip_address(peer_ip)
+            except ValueError:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'Bad IP')
+                return
+            try:
+                import urllib.request
+                url = f'http://{peer_ip}:8080/api/local'
+                req = urllib.request.Request(url, headers={'User-Agent': 'manet-proxy/1'})
+                with urllib.request.urlopen(req, timeout=4) as resp:
+                    data = json.loads(resp.read().decode())
+                self.send_json(data)
+            except Exception as e:
+                self.send_response(502)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
 
         elif path == '/api/debug':
             try:
