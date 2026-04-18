@@ -202,7 +202,7 @@ def get_my_hostname():
 def get_battery():
     """Return battery dict from battery-reader.py output, or None.
 
-    Dict keys: percentage, voltage_mv, current_ma, power_mw, charging, status, timestamp.
+    Dict keys: percentage, voltage_v, current_ma, power_w, charging, status, timestamp.
     Falls back to /sys/class/power_supply capacity (int) for backwards compat.
     """
     try:
@@ -223,7 +223,7 @@ def get_battery():
                         continue
                 with open(cap_path) as f:
                     return {'percentage': int(f.read().strip()), 'status': 'unknown',
-                            'voltage_mv': None, 'current_ma': None, 'power_mw': None,
+                            'voltage_v': None, 'current_ma': None, 'power_w': None,
                             'charging': None, 'timestamp': None}
             except Exception:
                 continue
@@ -1488,14 +1488,14 @@ function renderLocalPanel(d) {
     const pct = b.percentage;
     const col = battColor(pct);
     let extra = '';
-    if (b.voltage_mv != null) {
-      const v   = (b.voltage_mv / 1000).toFixed(2);
+    if (b.voltage_v != null) {
+      const v   = b.voltage_v.toFixed(3);
       const mA  = b.current_ma != null ? b.current_ma : null;
-      const mW  = b.power_mw  != null ? b.power_mw  : null;
+      const mW  = b.power_w  != null ? b.power_w  : null;
       const st  = b.status || '';
       const stIcon = st === 'charging' ? ' ⚡' : st === 'full' ? ' ✓' : '';
       const mAstr  = mA != null ? ` &nbsp;${mA > 0 ? '+' : ''}${mA}mA` : '';
-      const mWstr  = mW != null ? ` &nbsp;${mW}mW` : '';
+      const mWstr  = mW != null ? ` &nbsp;${mW}W` : '';
       extra = `<span style="font-size:9px;color:var(--muted)"> ${v}V${mAstr}${mWstr}${stIcon}</span>`;
     }
     battHtml = `${pct}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${pct}%;background:${col}"></span></span>${extra}`;
