@@ -2,7 +2,6 @@
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
   <name>MANET Perf Dashboard</name>
-  <host-name>perf.local</host-name>
   <service>
     <type>_http._tcp</type>
     <port>8081</port>
