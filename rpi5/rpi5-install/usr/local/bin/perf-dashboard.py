@@ -1224,6 +1224,27 @@ async function apply2G() {
   }
 }
 
+async function apply5G() {
+  const ch = document.getElementById('ch-5g').value;
+  setButtonBusy('btn-apply-5g', true, 'APPLYING...', 'APPLY TO ALL NODES');
+  showOverlay(`Applying 5G channel ${ch} to all nodes...`, 'info');
+  try {
+    const r = await fetch('/api/wifi/channel', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({interface: 'wlan1', channel: parseInt(ch)})
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    showMsg('5G channel applied to all nodes', 'ok');
+    await fetchTopo();
+  } catch (e) {
+    showMsg('5G channel failed: ' + e.message, 'err');
+  } finally {
+    setButtonBusy('btn-apply-5g', false, '', 'APPLY TO ALL NODES');
+  }
+}
+
 // ── Measurements tab ──
 function updatePairs() {
   if (!_topo) return;
@@ -1482,19 +1503,19 @@ def render_dashboard():
       <div class="row">
         <span class="row-label">Channel</span>
         <select id="halow-ch">
-          <option value="863500">863.5 MHz</option>
-          <option value="864500">864.5 MHz</option>
-          <option value="865500">865.5 MHz</option>
-          <option value="866500" selected>866.5 MHz</option>
-          <option value="867500">867.5 MHz</option>
-          <option value="868500">868.5 MHz</option>
+          <option value="1">ch 1 (863.5 MHz)</option>
+          <option value="2">ch 2 (864.5 MHz)</option>
+          <option value="3">ch 3 (865.5 MHz)</option>
+          <option value="4">ch 4 (866.5 MHz)</option>
+          <option value="5" selected>ch 5 (867.5 MHz)</option>
+          <option value="6">ch 6 (868.5 MHz)</option>
         </select>
       </div>
       <div class="row">
         <span class="row-label">Bandwidth</span>
         <select id="halow-bw">
-          <option value="1MHz">1 MHz</option>
-          <option value="2MHz" selected>2 MHz</option>
+          <option value="1MHz" selected>1 MHz</option>
+          <option value="2MHz">2 MHz</option>
           <option value="4MHz">4 MHz</option>
         </select>
       </div>
@@ -1508,12 +1529,48 @@ def render_dashboard():
       <div class="row">
         <span class="row-label">Channel</span>
         <select id="ch-2g">
-          ${''.join(f'<option value="{c}"{" selected" if c==6 else ""}>{c}</option>' for c in range(1,14))}
+          ${''.join(f'<option value="{c}"{" selected" if c==6 else ""}>ch {c} ({2407+c*5} MHz)</option>' for c in range(1,14))}
         </select>
       </div>
       <div class="row">
         <span class="row-label"></span>
         <button class="btn btn-green" id="btn-apply-2g" onclick="apply2G()">APPLY TO ALL NODES</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">5 GHz</div>
+      <div class="row">
+        <span class="row-label">Channel</span>
+        <select id="ch-5g">
+          <option value="36">ch 36 (5180 MHz)</option>
+          <option value="40">ch 40 (5200 MHz)</option>
+          <option value="44">ch 44 (5220 MHz)</option>
+          <option value="48">ch 48 (5240 MHz)</option>
+          <option value="52">ch 52 (5260 MHz)</option>
+          <option value="56">ch 56 (5280 MHz)</option>
+          <option value="60">ch 60 (5300 MHz)</option>
+          <option value="64">ch 64 (5320 MHz)</option>
+          <option value="100">ch 100 (5500 MHz)</option>
+          <option value="104">ch 104 (5520 MHz)</option>
+          <option value="108">ch 108 (5540 MHz)</option>
+          <option value="112">ch 112 (5560 MHz)</option>
+          <option value="116">ch 116 (5580 MHz)</option>
+          <option value="120">ch 120 (5600 MHz)</option>
+          <option value="124">ch 124 (5620 MHz)</option>
+          <option value="128">ch 128 (5640 MHz)</option>
+          <option value="132">ch 132 (5660 MHz)</option>
+          <option value="136">ch 136 (5680 MHz)</option>
+          <option value="140">ch 140 (5700 MHz)</option>
+          <option value="149">ch 149 (5745 MHz)</option>
+          <option value="153">ch 153 (5765 MHz)</option>
+          <option value="157">ch 157 (5785 MHz)</option>
+          <option value="161">ch 161 (5805 MHz)</option>
+          <option value="165">ch 165 (5825 MHz)</option>
+        </select>
+      </div>
+      <div class="row">
+        <span class="row-label"></span>
+        <button class="btn btn-green" id="btn-apply-5g" onclick="apply5G()">APPLY TO ALL NODES</button>
       </div>
     </div>
   </div>
