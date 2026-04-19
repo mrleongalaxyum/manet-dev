@@ -16,6 +16,7 @@ Endpoints:
   GET  /api/sessions            - List saved sessions
   GET  /api/sessions/<id>       - Get session JSON
   GET  /api/sessions/<id>/csv   - Get session CSV
+  DELETE /api/sessions/<id>     - Delete saved session
   POST /api/upload/github       - Git push measurements/
   POST /api/upload/ventum       - curl -u upload to Ventum
 """
@@ -30,10 +31,11 @@ import time
 import threading
 import csv
 import io
+import shutil
 import urllib.request
 import ipaddress
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 PORT            = 8081
 MESH_CONF_FILE  = '/etc/mesh.conf'
@@ -289,7 +291,7 @@ def get_halow_driver_info(iface='wlan2'):
             return info
     return info
 
-def call_node_api(node_ip, path, method='GET', data=None):
+def call_node_api(node_ip, path, method='GET', data=None, timeout=8):
     """Call mesh-status.py control API on a remote node."""
     try:
         url = f'http://{node_ip}:{CONTROL_PORT}{path}'
@@ -300,7 +302,7 @@ def call_node_api(node_ip, path, method='GET', data=None):
             method=method,
             headers={'Content-Type': 'application/json', 'User-Agent': 'perf-dashboard/1'}
         )
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
         return {'ok': False, 'error': str(e)}
@@ -429,6 +431,16 @@ def get_session_results(label):
             except Exception:
                 pass
     return results
+
+def delete_session(label):
+    safe_label = os.path.basename(label)
+    if safe_label != label or not label:
+        return False, 'Invalid session label'
+    d = os.path.join(SESSIONS_DIR, safe_label)
+    if not os.path.isdir(d):
+        return False, 'Session not found'
+    shutil.rmtree(d)
+    return True, ''
 
 def session_to_csv(label):
     results = get_session_results(label)
@@ -613,7 +625,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     # Run ping locally toward dst
                     resp = call_node_api(src_ip, '/api/ping/run', 'POST', {
                         'target': dst_ip, 'count': 100, 'interval': 0.2
-                    })
+                    }, timeout=40)
                     result_record['ping_result'] = resp.get('result')
                     result_record['ok'] = resp.get('ok', False)
                     if not result_record['ok']:
@@ -627,19 +639,21 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
 
                     reverse = test_type == 'reverse'
                     parallel = 4 if test_type == 'tcp_4stream' else 1
-                    resp = call_node_api(src_ip, '/api/iperf/client/run', 'POST', {
-                        'server_ip':  dst_ip,
-                        'test_type':  test_type,
-                        'duration':   duration,
-                        'bitrate':    udp_bitrate,
-                        'parallel':   parallel,
-                        'reverse':    reverse,
-                    })
-                    result_record['iperf3_result'] = resp.get('result')
-                    result_record['ok'] = resp.get('ok', False)
-                    if not result_record['ok']:
-                        result_record['error'] = resp.get('error', 'iperf client failed')
-                    call_node_api(dst_ip, '/api/iperf/server/stop', 'POST', {})
+                    try:
+                        resp = call_node_api(src_ip, '/api/iperf/client/run', 'POST', {
+                            'server_ip':  dst_ip,
+                            'test_type':  test_type,
+                            'duration':   duration,
+                            'bitrate':    udp_bitrate,
+                            'parallel':   parallel,
+                            'reverse':    reverse,
+                        }, timeout=duration + 25)
+                        result_record['iperf3_result'] = resp.get('result')
+                        result_record['ok'] = resp.get('ok', False)
+                        if not result_record['ok']:
+                            result_record['error'] = resp.get('error', 'iperf client failed')
+                    finally:
+                        call_node_api(dst_ip, '/api/iperf/server/stop', 'POST', {}, timeout=8)
 
                 # Save result
                 with open(os.path.join(session_dir, fname), 'w') as f:
@@ -1321,6 +1335,7 @@ async function loadSessions() {
            class="btn" style="text-decoration:none;font-size:10px">CSV</a>
         <a href="/api/sessions/${encodeURIComponent(s.label)}" target="_blank"
            class="btn" style="text-decoration:none;font-size:10px">JSON</a>
+        <button class="btn btn-red" style="font-size:10px" onclick="deleteSession('${encodeURIComponent(s.label)}')">DELETE</button>
       </div>
       <div class="session-summary">
         ${sessionMetric('TCP', s.summary?.tcp_mbps, ' Mbps')}
@@ -1335,6 +1350,20 @@ async function loadSessions() {
 function sessionMetric(label, stats, unit) {
   const txt = metricText(stats, unit);
   return `<div class="metric-mini">${label}<strong>${txt || '-'}</strong></div>`;
+}
+
+async function deleteSession(encodedLabel) {
+  const label = decodeURIComponent(encodedLabel);
+  if (!confirm(`Delete measurement session "${label}"? This cannot be undone.`)) return;
+  try {
+    const r = await fetch(`/api/sessions/${encodedLabel}`, {method: 'DELETE'});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    showMsg(`Deleted session ${label}`, 'ok');
+    await loadSessions();
+  } catch (e) {
+    showMsg('Delete failed: ' + e.message, 'err');
+  }
 }
 
 async function uploadGithub() {
@@ -1554,7 +1583,7 @@ def render_dashboard():
       <div class="upload-card">
         <div class="upload-info">
           <div class="upload-title">Ventum</div>
-          <div class="upload-sub">curl -u upload to manet.ventum.hr</div>
+          <div class="upload-sub">curl -u upload to manet.ventum.hr/upload/rpi5/measurements</div>
         </div>
         <button class="btn btn-green" id="upload-ventum" onclick="uploadVentum()" disabled>UPLOAD</button>
       </div>
@@ -1625,6 +1654,19 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_json(get_session_results(label))
 
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not found')
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path   = parsed.path.rstrip('/') or '/'
+
+        if path.startswith('/api/sessions/'):
+            label = unquote(path[len('/api/sessions/'):].split('/')[0])
+            ok, error = delete_session(label)
+            self.send_json({'ok': ok, 'error': error})
         else:
             self.send_response(404)
             self.end_headers()
@@ -1782,7 +1824,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/upload/ventum':
             try:
                 conf = load_kv_file('/etc/mesh.conf')
-                ventum_url = conf.get('ventum_upload_url', 'https://manet.ventum.hr/upload/rpi5')
+                ventum_url = conf.get('ventum_upload_url', 'https://manet.ventum.hr/upload/rpi5/measurements')
                 ventum_auth = conf.get('ventum_auth', '')
                 if not ventum_auth:
                     user = conf.get('ventum_user', 'clanker')
