@@ -3074,23 +3074,22 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 if not channel:
                     self.send_json({'ok': False, 'error': 'Missing channel'})
                     return
+                channel = int(channel)
+                # bw string → s1g_prim_chwidth value: 1MHz=0, 2MHz=1, 4MHz=2
+                bw_map  = {'1MHz': 0, '2MHz': 1, '4MHz': 2}
+                chwidth = bw_map.get(str(bw), 1)
                 # Write override flag so channel-election.sh doesn't overwrite
                 with open('/var/run/halow-channel-override', 'w') as f:
                     f.write(f'{channel},{bw}')
-                # Restart wpa_supplicant-s1g for wlan2 to pick up new channel
-                conf = load_kv_file(MESH_CONF_FILE)
-                reg  = conf.get('halow_regulatory_domain', conf.get('regulatory_domain', 'EU'))
-                wpa_conf = f'/etc/wpa_supplicant/wpa_supplicant_s1g-wlan2.conf'
-                try:
-                    with open(wpa_conf) as f:
-                        content = f.read()
-                    content = re.sub(r'frequency=\d+', f'frequency={channel}', content)
-                    content = re.sub(r'max_sc=\d+', '', content)
-                    with open(wpa_conf, 'w') as f:
-                        f.write(content)
-                except Exception:
-                    pass
-                subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g@wlan2.service'], timeout=10)
+                wpa_conf = '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf'
+                with open(wpa_conf) as f:
+                    content = f.read()
+                content = re.sub(r'(channel\s*=\s*)\d+', rf'\g<1>{channel}', content)
+                content = re.sub(r'(s1g_prim_chwidth\s*=\s*)\d+', rf'\g<1>{chwidth}', content)
+                with open(wpa_conf, 'w') as f:
+                    f.write(content)
+                subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g-wlan2.service'],
+                               timeout=15)
                 self.send_json({'ok': True, 'channel': channel, 'bw': bw})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
