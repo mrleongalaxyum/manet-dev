@@ -461,11 +461,69 @@ def get_interfaces():
                 if fm: iw_info[cur_iface]['channel'] = fm.group(1)
                 freqm = re.search(r'([\d.]+) GHz', line)
                 if freqm: iw_info[cur_iface]['freq'] = freqm.group(1)
+                wm = re.search(r'wiphy (\d+)', line)
+                if wm: iw_info[cur_iface]['wiphy'] = wm.group(1)
+                dm = re.search(r'wdev (0x[0-9a-fA-F]+)', line)
+                if dm: iw_info[cur_iface]['wiphy'] = str(int(dm.group(1), 16) >> 32)
     except Exception:
         pass
 
-    # HaLow (wlan2/morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
-    iw_info.setdefault('wlan2', {}).update(get_halow_driver_info('wlan2'))
+    # Build phy→band map: Band 1 = 2.4 GHz, Band 2 = 5 GHz (IEEE 802.11 convention)
+    # A phy with both bands → 2.4 GHz takes precedence (dual-band chip)
+    phy_band = {}  # wiphy_num_str -> '2.4 GHz' | '5 GHz'
+    try:
+        r3 = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
+        cur_phy = None
+        for line in r3.stdout.splitlines():
+            pm = re.match(r'Wiphy phy(\d+)', line)
+            if pm:
+                cur_phy = pm.group(1)
+                continue
+            if cur_phy is None:
+                continue
+            bh = re.match(r'\s+Band (\d+):', line)
+            if bh:
+                band_num = int(bh.group(1))
+                if band_num == 1:
+                    phy_band[cur_phy] = '2.4 GHz'  # Band 1 always 2.4 GHz
+                elif band_num == 2 and cur_phy not in phy_band:
+                    phy_band[cur_phy] = '5 GHz'    # Band 2 = 5 GHz, only if no Band 1
+    except Exception:
+        pass
+
+    # Read driver via ethtool and assign band_label
+    for iname in list(iw_info.keys()):
+        driver = ''
+        try:
+            et = subprocess.run(['ethtool', '-i', iname], capture_output=True, text=True, timeout=3)
+            for line in et.stdout.splitlines():
+                if line.startswith('driver:'):
+                    driver = line.split(':', 1)[1].strip()
+                    break
+        except Exception:
+            pass
+        iw_info[iname]['driver'] = driver
+        if 'morse' in driver:
+            iw_info[iname]['band_label'] = 'HaLow 900MHz'
+        else:
+            # Try runtime freq first, fall back to phy capability
+            freq_str = iw_info[iname].get('freq', '')
+            try:
+                freq_f = float(freq_str)
+                if freq_f < 2.0:
+                    iw_info[iname]['band_label'] = 'HaLow 900MHz'
+                elif freq_f < 3.0:
+                    iw_info[iname]['band_label'] = '2.4 GHz'
+                else:
+                    iw_info[iname]['band_label'] = '5 GHz'
+            except ValueError:
+                wiphy_num = iw_info[iname].get('wiphy', '')
+                iw_info[iname]['band_label'] = phy_band.get(wiphy_num, '')
+
+    # HaLow (morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
+    for iname in list(iw_info.keys()):
+        if 'morse' in iw_info[iname].get('driver', ''):
+            iw_info[iname].update(get_halow_driver_info(iname))
 
     # ── bat0 slaves (active interfaces per batctl) ──
     bat0_slaves_active   = set()   # confirmed active in batctl
@@ -557,9 +615,15 @@ def get_interfaces():
         ):
             # Mesh radio
             role = 'mesh'
-            freq = iw.get('freq', '')
-            ch   = iw.get('channel', '')
-            detail = f"Mesh radio — {freq}GHz ch{ch}" if freq else 'Mesh radio'
+            freq        = iw.get('freq', '')
+            ch          = iw.get('channel', '')
+            band_label  = iw.get('band_label', '')
+            if band_label:
+                detail = f"{band_label} — ch{ch}" if ch else band_label
+            elif freq:
+                detail = f"Mesh radio — {freq}GHz ch{ch}"
+            else:
+                detail = 'Mesh radio'
             if iw.get('ssid'):
                 detail += f" [{iw['ssid']}]"
 
@@ -2791,7 +2855,7 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             req.data = data
             req.add_header('Content-Length', str(len(data)))
         try:
-            with _ur.urlopen(req, timeout=30) as resp:
+            with _ur.urlopen(req, timeout=120) as resp:
                 self.send_response(resp.status)
                 for k, v in resp.headers.items():
                     if k.lower() not in ('transfer-encoding',):
@@ -3036,18 +3100,41 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
                     self.send_json({'ok': False, 'error': 'Invalid iface or state'})
                     return
-                if state == 'down':
-                    # Safety: refuse if this is the only active bat0 interface
-                    r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
-                    active = [l.split(':')[0] for l in r.stdout.splitlines() if 'active' in l]
-                    if len(active) <= 1 and iface in active:
-                        self.send_json({'ok': False, 'error': f'Cannot disable {iface}: last active mesh interface'})
-                        return
-                    subprocess.run(['batctl', 'if', 'del', iface], timeout=5)
-                    subprocess.run(['ip', 'link', 'set', iface, 'down'], timeout=5)
+                # Detect HaLow (morse_usb) — requires wpa_supplicant-s1g lifecycle
+                et = subprocess.run(['ethtool', '-i', iface], capture_output=True, text=True, timeout=3)
+                is_halow = any('morse' in l for l in et.stdout.splitlines() if l.startswith('driver:'))
+                if is_halow:
+                    svc = f'wpa_supplicant-s1g-{iface}.service'
+                    if state == 'down':
+                        subprocess.run(['systemctl', 'stop', svc], timeout=15)
+                        subprocess.run(['ip', 'link', 'set', iface, 'down'], timeout=5)
+                    else:
+                        # cfg80211 regulatory must be set before wpa_supplicant_s1g starts.
+                        # Restarting wpa_supplicant for a standard iface re-asserts country=EU.
+                        for std_svc in ('wpa_supplicant@wlan0.service', 'wpa_supplicant@wlan1.service'):
+                            r = subprocess.run(['systemctl', 'is-active', std_svc],
+                                               capture_output=True, text=True, timeout=3)
+                            if r.stdout.strip() == 'active':
+                                subprocess.run(['systemctl', 'restart', std_svc], timeout=15)
+                                import time; time.sleep(3)
+                                break
+                        subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
+                        subprocess.run(['systemctl', 'start', svc], timeout=15)
+                        bat_r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
+                        if not any(l.startswith(iface + ':') for l in bat_r.stdout.splitlines()):
+                            subprocess.run(['batctl', 'if', 'add', iface], timeout=10)
                 else:
-                    subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
-                    subprocess.run(['batctl', 'if', 'add', iface], timeout=5)
+                    svc = f'wpa_supplicant@{iface}.service'
+                    if state == 'down':
+                        subprocess.run(['batctl', 'if', 'del', iface], timeout=10)
+                        subprocess.run(['systemctl', 'stop', svc], timeout=15)
+                        subprocess.run(['ip', 'link', 'set', iface, 'down'], timeout=5)
+                    else:
+                        subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
+                        subprocess.run(['systemctl', 'start', svc], timeout=15)
+                        bat_r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
+                        if not any(l.startswith(iface + ':') for l in bat_r.stdout.splitlines()):
+                            subprocess.run(['batctl', 'if', 'add', iface], timeout=10)
                 self.send_json({'ok': True, 'iface': iface, 'state': state})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
@@ -3083,8 +3170,9 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                     self.send_json({'ok': False, 'error': f'Invalid EU S1G channel {channel}'})
                     return
                 bw_mhz = int(str(bw).replace('MHz', ''))
-                # bw string → s1g_prim_chwidth value: 1MHz=0, 2MHz=1, 4MHz=2
-                chwidth = {1: 0, 2: 1, 4: 2}.get(bw_mhz, 0)
+                # s1g_prim_chwidth: 0=1MHz primary, 1=2MHz primary
+                # For 4MHz operation, primary channel is 2MHz → chwidth=1
+                chwidth = {1: 0, 2: 1, 4: 1}.get(bw_mhz, 0)
                 # Write override flag so channel-election.sh doesn't overwrite
                 with open('/var/run/halow-channel-override', 'w') as f:
                     f.write(f'{channel},{bw}')

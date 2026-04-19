@@ -19,12 +19,29 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] - SAE-WATCHDOG: $*"
 }
 
+radio_iface_enabled() {
+    python3 - "$1" <<'PY'
+import json, sys
+iface = sys.argv[1]
+try:
+    with open('/var/lib/mesh_radio_state.json') as f:
+        state = json.load(f).get('desired', {}).get(iface, 'up')
+except Exception:
+    state = 'up'
+sys.exit(1 if state == 'down' else 0)
+PY
+}
+
 restart_mesh() {
     local reason="$1"
     log "Triggered by: $reason"
     log "Restarting wpa_supplicant for all standard mesh interfaces..."
 
     for iface in $STANDARD_MESH_INTERFACES; do
+        if ! radio_iface_enabled "$iface"; then
+            log "Skipping wpa_supplicant@${iface}.service (radio-state says down)"
+            continue
+        fi
         systemctl restart "wpa_supplicant@${iface}.service" 2>/dev/null && \
             log "Restarted wpa_supplicant@${iface}.service" || \
             log "WARNING: failed to restart wpa_supplicant@${iface}.service"
@@ -44,6 +61,7 @@ restart_mesh() {
 # thrashing on a healthy node that just happens to see a blocked peer.
 bat0_has_all_interfaces() {
     for iface in $STANDARD_MESH_INTERFACES; do
+        radio_iface_enabled "$iface" || continue
         batctl if 2>/dev/null | grep -q "^${iface}:" || return 1
     done
     return 0
