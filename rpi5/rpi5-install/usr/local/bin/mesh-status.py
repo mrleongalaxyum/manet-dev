@@ -2804,6 +2804,144 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
+        elif path == '/api/control/interface':
+            try:
+                req   = json.loads(body)
+                iface = req.get('iface', '')
+                state = req.get('state', '')  # 'up' or 'down'
+                if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
+                    self.send_json({'ok': False, 'error': 'Invalid iface or state'})
+                    return
+                if state == 'down':
+                    # Safety: refuse if this is the only active bat0 interface
+                    r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
+                    active = [l.split(':')[0] for l in r.stdout.splitlines() if 'active' in l]
+                    if len(active) <= 1 and iface in active:
+                        self.send_json({'ok': False, 'error': f'Cannot disable {iface}: last active mesh interface'})
+                        return
+                    subprocess.run(['batctl', 'if', 'del', iface], timeout=5)
+                    subprocess.run(['ip', 'link', 'set', iface, 'down'], timeout=5)
+                else:
+                    subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
+                    subprocess.run(['batctl', 'if', 'add', iface], timeout=5)
+                self.send_json({'ok': True, 'iface': iface, 'state': state})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/control/txpower':
+            try:
+                req   = json.loads(body)
+                iface = req.get('iface', '')
+                dbm   = req.get('dbm')   # integer dBm
+                if not iface or dbm is None:
+                    self.send_json({'ok': False, 'error': 'Missing iface or dbm'})
+                    return
+                mbm = int(float(dbm) * 100)
+                subprocess.run(['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(mbm)], timeout=5)
+                self.send_json({'ok': True, 'iface': iface, 'dbm': dbm})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/control/halow_channel':
+            try:
+                req     = json.loads(body)
+                channel = req.get('channel')
+                bw      = req.get('bw', '2MHz')
+                if not channel:
+                    self.send_json({'ok': False, 'error': 'Missing channel'})
+                    return
+                # Write override flag so channel-election.sh doesn't overwrite
+                with open('/var/run/halow-channel-override', 'w') as f:
+                    f.write(f'{channel},{bw}')
+                # Restart wpa_supplicant-s1g for wlan2 to pick up new channel
+                conf = load_kv_file(MESH_CONF_FILE)
+                reg  = conf.get('halow_regulatory_domain', conf.get('regulatory_domain', 'EU'))
+                wpa_conf = f'/etc/wpa_supplicant/wpa_supplicant_s1g-wlan2.conf'
+                try:
+                    with open(wpa_conf) as f:
+                        content = f.read()
+                    content = re.sub(r'frequency=\d+', f'frequency={channel}', content)
+                    content = re.sub(r'max_sc=\d+', '', content)
+                    with open(wpa_conf, 'w') as f:
+                        f.write(content)
+                except Exception:
+                    pass
+                subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g@wlan2.service'], timeout=10)
+                self.send_json({'ok': True, 'channel': channel, 'bw': bw})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/iperf/server/start':
+            try:
+                subprocess.run(['pkill', '-f', 'iperf3 -s'], capture_output=True)
+                subprocess.Popen(['iperf3', '-s', '--one-off', '-J',
+                                  '--logfile', '/tmp/iperf3-server.log'])
+                self.send_json({'ok': True})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/iperf/server/stop':
+            try:
+                subprocess.run(['pkill', '-f', 'iperf3 -s'], capture_output=True)
+                self.send_json({'ok': True})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/iperf/client/run':
+            try:
+                req        = json.loads(body)
+                server_ip  = req.get('server_ip', '')
+                test_type  = req.get('test_type', 'tcp_1stream')
+                duration   = int(req.get('duration', 30))
+                bitrate    = req.get('bitrate', '4M')
+                parallel   = int(req.get('parallel', 1))
+                reverse    = bool(req.get('reverse', False))
+
+                cmd = ['iperf3', '-c', server_ip, '-t', str(duration), '-J']
+                if test_type in ('udp_throughput', 'udp_jitter', 'packet_loss'):
+                    cmd += ['-u', '-b', bitrate]
+                if parallel > 1:
+                    cmd += ['-P', str(parallel)]
+                if reverse:
+                    cmd += ['-R']
+
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 15)
+                try:
+                    result = json.loads(r.stdout)
+                except Exception:
+                    result = {'raw': r.stdout, 'stderr': r.stderr}
+                self.send_json({'ok': True, 'result': result})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/ping/run':
+            try:
+                req    = json.loads(body)
+                target = req.get('target', '')
+                count  = int(req.get('count', 100))
+                interval = float(req.get('interval', 0.2))
+                if not target:
+                    self.send_json({'ok': False, 'error': 'Missing target'})
+                    return
+                r = subprocess.run(
+                    ['ping', '-c', str(count), '-i', str(interval), target],
+                    capture_output=True, text=True, timeout=count * interval + 10
+                )
+                # Parse ping summary line
+                rtt_match  = re.search(r'rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)', r.stdout)
+                loss_match = re.search(r'(\d+)% packet loss', r.stdout)
+                result = {
+                    'output':   r.stdout,
+                    'rtt_min':  float(rtt_match.group(1)) if rtt_match else None,
+                    'rtt_avg':  float(rtt_match.group(2)) if rtt_match else None,
+                    'rtt_max':  float(rtt_match.group(3)) if rtt_match else None,
+                    'rtt_mdev': float(rtt_match.group(4)) if rtt_match else None,
+                    'loss_pct': int(loss_match.group(1))  if loss_match else None,
+                }
+                self.send_json({'ok': True, 'result': result})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
         else:
             self.send_response(404)
             self.end_headers()
