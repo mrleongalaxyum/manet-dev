@@ -6,6 +6,20 @@ Akademski zadatak: eksperimentalna analiza IEEE 802.11ah (HaLow) MANET mreže za
 Mjerenja se provode na 4-nodnoj RPi5 MANET mreži s batman-adv L2 mesh protokolom.
 Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija i upravljanje interfaceima — **ne** kao live monitoring.
 
+### Trenutni status implementacije
+- `perf-dashboard.py` postoji i radi kao Python `http.server` na portu 8081.
+- `perf-dashboard.service`, `perf-http.service` i `/etc/sudoers.d/perf` postoje u RPi5 install treeju.
+- `mesh-status.py` je proširen control endpointima za interface toggle, tx power, HaLow channel, iperf server/client i ping.
+- Basic auth je isključen za admin UI; `/admin` ne smije otvarati browser login prozor. Runtime control endpointi na `mesh-status.py` nisu admin-form endpointi: dostupni su server-to-server pozivima iz `perf-dashboard.py` za localhost/mesh subnet IP-eve.
+- `perf-dashboard.py` CSS ima mobile breakpoint za uske ekrane: header/nav se lome, kartice i forme idu u jednu kolonu, global action buttons u 2 kolone, a tablice dobivaju horizontalni scroll samo unutar tablice.
+- Hop matrix tablica i hop-count računanje su uklonjeni iz perf dashboarda; hop/multihop vizualizacija ostaje u glavnom `mesh-status.py` topology prikazu.
+- HaLow runtime info se prvo pokušava čitati kroz Morse driver tooling (`morse_cli` channel info, JSON ili parsable text), jer `iw` može prijaviti krivi standardni Wi-Fi kanal. `wpa_supplicant_s1g` config ostaje samo fallback/debug.
+
+### Otvoreno / sljedeći koraci
+- Provjeriti točnu `morse_cli` runtime sintaksu na fizičkom nodu. Implementacija trenutno pokušava više varijanti, uključujući `morse_cli -i wlan2 channel -j`, `--json` i text output.
+- Ako produkcijski Morse alat koristi drugačiji morsectrl transport call, zamijeniti listu pokušaja u `get_halow_driver_info()`.
+- Nakon deploya potvrditi da `/api/topology` i `/api/data` vraćaju `halow_source: "morse"` za `wlan2`; `halow_source: "config"` znači da driver alat nije vratio parsable runtime podatke.
+
 ---
 
 ## Mesh arhitektura
@@ -96,7 +110,8 @@ sudo batctl if add wlan0
 ```
 
 ### 2. HaLow Channel & Bandwidth Selection
-- Prikaz trenutnog kanala (iz wpa_supplicant_s1g.conf ili iwinfo)
+- Prikaz trenutnog kanala i bandwidtha mora dolaziti iz Morse drivera (`morse_cli`/morsectrl channel info), jer `iw dev wlan2 info` može prijaviti krivi standardni Wi-Fi kanal/frekvenciju.
+- `wpa_supplicant-wlan2-s1g.conf` opisuje željenu konfiguraciju, ali nije pouzdan runtime izvor istine nakon driver/channel promjena.
 - Dropdown odabir kanala (EU S1G kanali: 863.5–868 MHz, 1 MHz / 2 MHz / 4 MHz širina)
 - Propagacija na sve nodove kroz mesh (POST na svaki nod)
 - **Napomena:** Trenutno channel election radi kroz Alfred consensus (`channel-election.sh`) — novi dashboard treba bypass mechanism koji piše direktno u wpa_supplicant config i restarta
@@ -106,7 +121,7 @@ sudo batctl if add wlan0
 **Session metadata (obavezno za svako mjerenje):**
 - `session_label` — slobodan unos (npr. "outdoor-50m", "indoor-1hop")
 - `timestamp` — automatski (ISO8601)
-- `topology_snapshot` — koji interfacei aktivni, koji kanal, hop count između nodova
+- `topology_snapshot` — koji interfacei aktivni, HaLow kanal/BW, 2.4 GHz kanal
 - GPS koordinate (opcionalno, za budući GPS modul)
 
 **iperf3 test tipovi:**
@@ -123,7 +138,7 @@ sudo batctl if add wlan0
 - Dropdown: odaberi source nod i destination nod
 - Dashboard zna mesh IP svakog noda
 - Pokreće `iperf3 -s` na destination, `iperf3 -c <dst_ip>` na source
-- Hop count između odabranog para (iz `batctl o`) prikazuje se uz odabir
+- Hop count se trenutno ne prikazuje i ne sprema u perf dashboardu. Ako kasnije zatreba, računati ga odvojeno i pažljivo jer `batctl o` koristi interface MAC-ove, ne nužno primary node MAC.
 
 **Rezultati:**
 - JSON output iperf3 (`--json` flag) sprema se u `/var/log/manet-measurements/<session_label>/<timestamp>_<src>_<dst>.json`
@@ -151,10 +166,10 @@ sudo batctl if add wlan0
   "test_type": "tcp_throughput",
   "source_node": "mesh-78f3",
   "destination_node": "mesh-7946",
-  "hop_count": 2,
   "active_interfaces": ["wlan0", "wlan1", "wlan2"],
-  "halow_channel": 42,
-  "halow_bandwidth": "2MHz",
+  "halow_channel": 5,
+  "halow_bw": "1MHz",
+  "ch_2g": "6",
   "gps_source": null,
   "gps_destination": null,
   "iperf3_result": { ... }
@@ -163,7 +178,7 @@ sudo batctl if add wlan0
 
 ### CSV summary (po sesiji)
 ```
-timestamp,session_label,test_type,src,dst,hop_count,tcp_mbps,udp_mbps,jitter_ms,loss_pct,active_ifaces
+timestamp,session_label,test_type,src_node,dst_node,active_interfaces,halow_channel,halow_bw,tcp_mbps,udp_mbps,jitter_ms,loss_pct,rtt_avg_ms,rtt_min_ms,rtt_max_ms
 ```
 
 ---
@@ -215,9 +230,10 @@ rpi5/rpi5-install/usr/local/bin/ethernet-autodetect.sh  # Start/stop perf-dashbo
 ### API endpointi na perf-dashboard.py
 ```
 GET  /                          # Dashboard HTML
-GET  /api/topology              # Trenutna topologija (bat0, interfacei, hop count)
+GET  /api/topology              # Trenutna topologija (nodovi, interfacei, gateway/internet)
 POST /api/interface/toggle      # Toggle wlan interface na nodu(ovima)
 POST /api/halow/channel         # Postavi HaLow kanal/BW na sve nodove
+POST /api/txpower               # Postavi TX power po nodu/interfaceu
 POST /api/measure/start         # Pokretanje iperf3 sesije
 GET  /api/measure/status        # Status tekućeg mjerenja
 GET  /api/sessions              # Lista prošlih sesija
@@ -227,12 +243,16 @@ POST /api/upload/ventum         # SCP na Ventum
 ```
 
 ### Control API na svakom nodu (dodati u mesh-status.py)
+Control API je mesh-local/server-to-server: dozvoljen je samo za localhost ili IP iz mesh subneta (`ipv4_network`), bez admin Basic autha. Admin UI je također bez Basic autha da se na mobitelu ne pojavljuje login dialog.
+
 ```
 POST /api/control/interface     # { "iface": "wlan0", "state": "up"|"down" }
 POST /api/control/halow_channel # { "channel": 42, "bw": "2MHz" }
+POST /api/control/txpower       # { "iface": "wlan0", "dbm": 15 }
 POST /api/iperf/server/start    # Pokreni iperf3 -s
 POST /api/iperf/server/stop
 POST /api/iperf/client/run      # { "server_ip": "...", "test_type": "...", ...params }
+POST /api/ping/run              # { "target": "...", "count": 100, "interval": 0.2 }
 ```
 
 ---
@@ -261,7 +281,7 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
    - `batctl o` daje TQ per originator
    - Ako gašenje wlan0 ostavlja nod s TQ=0 prema nekom originatoru koji se jedino vidi kroz taj interface — zabrani toggle
 
-4. **HaLow channel override** zaobilazi `channel-election.sh` — potrebno postaviti flag `/var/run/halow-channel-override` da election skripta ne overridea manualnu selekciju
+4. **HaLow channel override** zaobilazi `channel-election.sh` — potrebno postaviti flag `/var/run/halow-channel-override` da election skripta ne overridea manualnu selekciju. Runtime prikaz kanala/BW mora se čitati kroz Morse driver (`morse_cli`/morsectrl channel JSON), ne iz `iw`.
 
 5. **GPS integracija (future)** — `/run/gps_location.json` format: `{"lat": 45.123, "lon": 15.456, "accuracy": 3.0}` — dashboard će ga uključiti u snapshot ako postoji
 

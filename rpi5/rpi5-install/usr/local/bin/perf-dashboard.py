@@ -6,7 +6,7 @@ Port 8081. Runs on all nodes. Accessible via wlan3 AP or LAN.
 
 Endpoints:
   GET  /                        - Dashboard HTML
-  GET  /api/topology            - Mesh topology (nodes, interfaces, hop counts)
+  GET  /api/topology            - Mesh topology (nodes, interfaces)
   POST /api/interface/toggle    - Toggle wlan interface on node(s)
   POST /api/halow/channel       - Set HaLow channel/BW on all nodes
   POST /api/txpower             - Set TX power on node/interface
@@ -110,18 +110,179 @@ def get_bat0_active_ifaces():
     except Exception:
         return []
 
-def get_hop_count(dst_ip):
-    """Estimate hop count to dst_ip via traceroute (max 5 hops, fast)."""
+def _first_flat_value(data, keys):
+    """Find the first matching key in a nested dict/list structure."""
+    if isinstance(data, dict):
+        for key in keys:
+            if key in data and data[key] not in (None, ''):
+                return data[key]
+        for value in data.values():
+            found = _first_flat_value(value, keys)
+            if found not in (None, ''):
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = _first_flat_value(item, keys)
+            if found not in (None, ''):
+                return found
+    return None
+
+def _json_from_text(text):
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text):
+        if char not in '[{':
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[idx:])
+            return data
+        except Exception:
+            pass
+    return None
+
+def _format_halow_bw(value):
+    if value in (None, ''):
+        return ''
+    text = str(value).strip()
+    low = text.lower()
+    if low.endswith('mhz'):
+        return text.replace('mhz', 'MHz').replace('MHZ', 'MHz')
     try:
-        r = subprocess.run(
-            ['traceroute', '-n', '-m', '5', '-w', '1', dst_ip],
-            capture_output=True, text=True, timeout=10
-        )
-        hops = [l for l in r.stdout.splitlines()
-                if re.match(r'\s*\d+\s+[\d.]', l) and '* * *' not in l]
-        return len(hops)
+        num = float(text)
+        if num >= 1000000:
+            num /= 1000000
+        elif num >= 1000:
+            num /= 1000
+        if num in (1, 2, 4):
+            return f'{int(num)}MHz'
     except Exception:
-        return None
+        pass
+    return text
+
+def _channel_from_frequency(freq_value):
+    try:
+        m = re.search(r'[0-9.]+', str(freq_value))
+        freq = float(m.group(0)) if m else None
+    except Exception:
+        return '', ''
+    if freq is None:
+        return '', ''
+    if freq > 1000000:
+        freq_khz = freq / 1000.0
+        freq_mhz = freq / 1000000.0
+    elif freq > 1000:
+        freq_khz = freq
+        freq_mhz = freq / 1000.0
+    else:
+        freq_khz = freq * 1000.0
+        freq_mhz = freq
+    channel = ''
+    for idx, center_khz in enumerate(HALOW_EU_CHANNELS, start=1):
+        if abs(freq_khz - center_khz) <= 500:
+            channel = str(idx)
+            break
+    return channel, f'{freq_mhz:.3f}'.rstrip('0').rstrip('.')
+
+def _parse_morse_channel_output(text):
+    info = {}
+    data = _json_from_text(text)
+    if data is not None:
+        freq = _first_flat_value(data, [
+            'channel_frequency', 'frequency', 'freq', 'freq_khz', 'freq_hz',
+            'operating_frequency', 'op_chan_freq'
+        ])
+        bw = _first_flat_value(data, [
+            'channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw',
+            'bandwidth', 'bw', 'op_chan_bw'
+        ])
+        idx = _first_flat_value(data, [
+            'channel_index', 'channel', 'primary_channel', 's1g_channel'
+        ])
+    else:
+        freq = None
+        bw = None
+        idx = None
+        for key in ('channel_frequency', 'frequency', 'freq_khz', 'freq_hz', 'op_chan_freq'):
+            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+)"?', text, re.I)
+            if m:
+                freq = m.group(1)
+                break
+        for key in ('channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw', 'bandwidth', 'op_chan_bw'):
+            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+\s*(?:[kKmM][hH][zZ])?)"?', text, re.I)
+            if m:
+                bw = m.group(1)
+                break
+        m = re.search(r'channel(?:_index)?\s*[:=]\s*"?(\d+)"?', text, re.I)
+        if m:
+            idx = m.group(1)
+
+    if freq not in (None, ''):
+        channel, freq_mhz = _channel_from_frequency(freq)
+        if channel:
+            info['channel'] = channel
+        if freq_mhz:
+            info['freq_mhz'] = freq_mhz
+    if bw not in (None, ''):
+        info['halow_bw'] = _format_halow_bw(bw)
+    if idx not in (None, '') and 'channel' not in info:
+        info['channel'] = str(idx)
+    if info:
+        info['halow_source'] = 'morse'
+    return info
+
+def get_halow_driver_info(iface='wlan2'):
+    """Read HaLow runtime channel data from Morse tooling; config is only fallback."""
+    binaries = ['/usr/local/bin/morse_cli', 'morse_cli']
+    variants = [
+        lambda b: [b, '-i', iface, 'channel', '-j'],
+        lambda b: [b, '-i', iface, 'channel', '--json'],
+        lambda b: [b, 'channel', '-i', iface, '-j'],
+        lambda b: [b, '-i', iface, 'channel'],
+        lambda b: [b, 'channel', '-i', iface],
+    ]
+    seen = set()
+    for binary in binaries:
+        if binary.startswith('/') and not os.path.exists(binary):
+            continue
+        for build in variants:
+            cmd = build(binary)
+            key = tuple(cmd)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            except Exception:
+                continue
+            text = (r.stdout or '') + '\n' + (r.stderr or '')
+            if r.returncode != 0 and not text.strip():
+                continue
+            parsed = _parse_morse_channel_output(text)
+            if parsed:
+                return parsed
+
+    info = {}
+    for conf_path in (
+        '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf',
+        '/etc/wpa_supplicant/wpa_supplicant_s1g-wlan2.conf',
+    ):
+        try:
+            with open(conf_path) as f:
+                txt = f.read()
+        except Exception:
+            continue
+        m = re.search(r'channel\s*=\s*(\d+)', txt)
+        if m:
+            info['channel'] = m.group(1)
+        m = re.search(r'op_class\s*=\s*(\d+)', txt)
+        if m:
+            info['op_class'] = m.group(1)
+        m = re.search(r's1g_prim_chwidth\s*=\s*(\d+)', txt)
+        if m:
+            info['halow_bw'] = {'0': '1MHz', '1': '2MHz', '2': '4MHz'}.get(m.group(1), m.group(1))
+        if info:
+            info['halow_source'] = 'config'
+            return info
+    return info
 
 def call_node_api(node_ip, path, method='GET', data=None):
     """Call mesh-status.py control API on a remote node."""
@@ -154,6 +315,11 @@ def get_iw_info(iface):
             info['txpower_dbm'] = m.group(1)
     except Exception:
         pass
+
+    # HaLow (morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
+    if iface == 'wlan2':
+        info.update(get_halow_driver_info(iface))
+
     return info
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,8 +367,10 @@ def build_topology():
                 node_info['interfaces'] = {
                     i['name']: {
                         'active': i.get('health') == 'ok' and i.get('role') == 'mesh',
-                        'channel': '',
-                        'freq_mhz': '',
+                        'channel': i.get('channel', ''),
+                        'freq_mhz': i.get('freq_mhz', ''),
+                        'halow_bw': i.get('halow_bw', ''),
+                        'halow_source': i.get('halow_source', ''),
                     }
                     for i in ifaces_raw if i.get('name') in ('wlan0', 'wlan1', 'wlan2')
                 }
@@ -214,21 +382,8 @@ def build_topology():
     # Sort: self first
     nodes.sort(key=lambda n: (not n['is_me'], n['hostname']))
 
-    # Build hop count matrix
-    hop_matrix = {}
-    for src in nodes:
-        for dst in nodes:
-            if src['id'] == dst['id']:
-                continue
-            key = f"{src['id']}-{dst['id']}"
-            if src['is_me'] and dst.get('ip'):
-                hop_matrix[key] = get_hop_count(dst['ip'])
-            else:
-                hop_matrix[key] = None
-
     return {
         'nodes':      nodes,
-        'hop_matrix': hop_matrix,
         'my_hostname': my_host,
         'my_ip':      my_ip,
         'internet':   has_internet(),
@@ -271,7 +426,7 @@ def session_to_csv(label):
     writer = csv.writer(output)
     writer.writerow([
         'timestamp', 'session_label', 'test_type',
-        'src_node', 'dst_node', 'hop_count',
+        'src_node', 'dst_node',
         'active_interfaces', 'halow_channel', 'halow_bw',
         'tcp_mbps', 'udp_mbps', 'jitter_ms', 'loss_pct',
         'rtt_avg_ms', 'rtt_min_ms', 'rtt_max_ms',
@@ -298,7 +453,6 @@ def session_to_csv(label):
             r.get('test_type', ''),
             r.get('source_node', ''),
             r.get('destination_node', ''),
-            r.get('hop_count', ''),
             ','.join(r.get('active_interfaces', [])),
             r.get('halow_channel', ''),
             r.get('halow_bw', ''),
@@ -319,8 +473,8 @@ def snapshot_topology():
     iw0    = get_iw_info('wlan0')
     return {
         'active_interfaces': active,
-        'halow_channel':  iw2.get('freq_mhz', ''),
-        'halow_bw':       '',
+        'halow_channel':  iw2.get('channel', ''),
+        'halow_bw':       iw2.get('halow_bw', ''),
         'ch_2g':          iw0.get('channel', ''),
     }
 
@@ -340,7 +494,6 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
         dst_ip   = pair['dst_ip']
         src_name = pair['src_name']
         dst_name = pair['dst_name']
-        hop_count = pair.get('hop_count')
 
         for test_type in tests:
             with _measure_lock:
@@ -354,7 +507,6 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                 'test_type':        test_type,
                 'source_node':      src_name,
                 'destination_node': dst_name,
-                'hop_count':        hop_count,
                 'active_interfaces': topo['active_interfaces'],
                 'halow_channel':    topo['halow_channel'],
                 'halow_bw':         topo['halow_bw'],
@@ -422,13 +574,13 @@ CSS = """
   --font:    'Share Tech Mono', 'Courier New', monospace;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;min-height:100vh}
+html,body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;min-height:100vh;max-width:100%;overflow-x:hidden}
 
 /* scanline overlay */
 body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.08) 2px,rgba(0,0,0,.08) 4px);pointer-events:none;z-index:9999}
 
 /* header */
-#hdr{background:var(--surface);border-bottom:2px solid var(--accent);padding:0 20px;height:48px;display:flex;align-items:center;gap:20px;position:sticky;top:0;z-index:100}
+#hdr{background:var(--surface);border-bottom:2px solid var(--accent);padding:0 20px;min-height:48px;display:flex;align-items:center;gap:20px;position:sticky;top:0;z-index:100}
 #hdr-logo{color:var(--accent);font-size:18px;letter-spacing:4px;font-weight:700;text-shadow:0 0 20px var(--accent)}
 #hdr-logo span{color:var(--green);text-shadow:0 0 20px var(--green)}
 #hdr-node{font-size:11px;color:var(--muted);border-left:1px solid var(--border);padding-left:16px}
@@ -440,19 +592,19 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 #hdr-clock{color:var(--muted);font-size:11px}
 
 /* nav */
-#nav{background:var(--surface);border-bottom:1px solid var(--border2);display:flex;padding:0 20px}
+#nav{background:var(--surface);border-bottom:1px solid var(--border2);display:flex;padding:0 20px;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .tab{padding:12px 20px;cursor:pointer;font-size:11px;letter-spacing:2px;color:var(--muted);border-bottom:2px solid transparent;text-transform:uppercase;transition:all .15s;position:relative}
 .tab:hover{color:var(--text)}
 .tab.active{color:var(--accent);border-color:var(--accent);text-shadow:0 0 10px var(--accent)}
 .tab.active::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;background:var(--accent);box-shadow:0 0 8px var(--accent)}
 
 /* layout */
-#content{padding:20px;max-width:1100px}
+#content{padding:20px;max-width:1100px;width:100%;margin:0 auto}
 
 /* card */
 .card{background:var(--card);border:1px solid var(--border);margin-bottom:16px;position:relative;overflow:hidden}
 .card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:.4}
-.card-title{padding:10px 16px;font-size:10px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;border-bottom:1px solid var(--border2);display:flex;align-items:center;gap:8px}
+.card-title{padding:10px 16px;font-size:10px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;border-bottom:1px solid var(--border2);display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .card-title::before{content:'//';color:var(--muted)}
 
 /* rows */
@@ -464,7 +616,7 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 input[type=text],input[type=number],select{
   background:#060c12;border:1px solid var(--border);color:var(--text);
   padding:6px 10px;font-family:var(--font);font-size:12px;
-  outline:none;transition:border .15s;min-width:150px;
+  outline:none;transition:border .15s;min-width:150px;max-width:100%;
 }
 input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 8px #00e5ff20}
 select option{background:#0c1117}
@@ -490,7 +642,6 @@ input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent)}
 .b-off{color:var(--muted); border-color:#1a2e4260;background:transparent}
 .b-gw {color:var(--orange);border-color:#ff880040;background:#ff880010}
 .b-me {color:var(--purple);border-color:#7c6cff40;background:#7c6cff10}
-.b-hop{color:var(--accent); border-color:#00e5ff30;background:#00e5ff08;font-size:9px}
 
 /* table */
 table{width:100%;border-collapse:collapse}
@@ -501,7 +652,7 @@ tr:last-child td{border-bottom:none}
 tr:hover td{background:#0f1923}
 
 /* node grid */
-.node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;padding:16px}
+.node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));gap:12px;padding:16px}
 .node-card{background:#060c12;border:1px solid var(--border2);padding:14px;position:relative;transition:border .15s}
 .node-card:hover{border-color:var(--border)}
 .node-card.is-me{border-color:#7c6cff50}
@@ -513,25 +664,25 @@ tr:hover td{background:#0f1923}
 .iface-on {color:var(--green);border-color:#00ff8840;background:#00ff8808}
 .iface-off{color:var(--muted);border-color:#1a2e4260}
 .node-battery{font-size:10px;color:var(--muted)}
-.node-tags{position:absolute;top:10px;right:10px;display:flex;gap:4px}
+.node-tags{position:absolute;top:10px;right:10px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;max-width:45%}
 
 /* interface toggle cards */
 .iface-block{padding:12px 16px;border-bottom:1px solid var(--border2)}
 .iface-block:last-child{border-bottom:none}
-.iface-header{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+.iface-header{display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap}
 .iface-name{font-size:13px;font-weight:700;min-width:60px}
 .iface-band{font-size:10px;color:var(--muted);letter-spacing:.5px}
 .iface-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.txpwr-row{display:flex;align-items:center;gap:8px;margin-top:4px;padding-left:72px;font-size:11px;color:var(--muted)}
+.txpwr-row{display:flex;align-items:center;gap:8px;margin-top:4px;padding-left:72px;font-size:11px;color:var(--muted);flex-wrap:wrap}
 
 /* global actions bar */
 .global-bar{display:flex;gap:8px;flex-wrap:wrap;padding:12px 16px}
 
 /* pairs */
-.pairs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px;padding:12px 16px}
-.pair-item{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#060c12;border:1px solid var(--border2);cursor:pointer;transition:border .15s}
-.pair-item:hover{border-color:var(--border)}
-.pair-item input{flex-shrink:0}
+.pairs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(260px,100%),1fr));gap:6px;padding:12px 16px}
+.pair-item,.pair-row{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#060c12;border:1px solid var(--border2);cursor:pointer;transition:border .15s;min-width:0}
+.pair-item:hover,.pair-row:hover{border-color:var(--border)}
+.pair-item input,.pair-row input{flex-shrink:0}
 .pair-label{font-size:12px;flex:1}
 .pair-arrow{color:var(--accent);margin:0 4px}
 
@@ -557,18 +708,62 @@ tr:hover td{background:#0f1923}
 #msg.info{border-color:var(--accent);color:var(--accent);background:#00e5ff08;display:block}
 
 /* session list */
-.session-row{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border2)}
+.session-row{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border2);flex-wrap:wrap}
 .session-row:last-child{border-bottom:none}
 .session-label{flex:1;font-size:13px}
 .session-count{font-size:11px;color:var(--muted)}
 .session-actions{display:flex;gap:6px}
 
 /* upload */
-.upload-card{padding:16px;display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border2)}
+.upload-card{padding:16px;display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border2);flex-wrap:wrap}
 .upload-card:last-child{border-bottom:none}
 .upload-info{flex:1}
 .upload-title{font-size:13px;margin-bottom:2px}
 .upload-sub{font-size:10px;color:var(--muted);letter-spacing:.3px}
+
+@media (max-width: 620px) {
+  html,body{font-size:12px}
+  #hdr{position:relative;padding:10px 12px;gap:8px;align-items:flex-start;flex-wrap:wrap}
+  #hdr-logo{font-size:16px;letter-spacing:2px;width:100%}
+  #hdr-node{border-left:0;padding-left:0;font-size:10px;max-width:100%;overflow-wrap:anywhere}
+  #hdr-right{margin-left:0;width:100%;justify-content:space-between;gap:8px}
+  #hdr-clock{font-size:10px}
+  #hdr-inet{font-size:9px;padding:3px 8px}
+  #nav{padding:0 8px}
+  .tab{padding:10px 11px;font-size:10px;letter-spacing:1px;white-space:nowrap;flex:0 0 auto}
+  #content{padding:10px}
+  .card{margin-bottom:10px}
+  .card-title{padding:9px 10px;letter-spacing:1px}
+  .row{padding:10px;gap:8px;align-items:stretch}
+  .row-label{flex:0 0 100%;font-size:10px}
+  input[type=text],input[type=number],select{width:100%!important;min-width:0}
+  .btn{width:100%;justify-content:center;text-align:center;padding:9px 10px}
+  .btn-run{padding:12px 10px;font-size:12px;letter-spacing:1px}
+  .global-bar{padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .global-bar .btn{width:100%;font-size:10px;letter-spacing:.5px}
+  .node-grid{padding:10px;grid-template-columns:1fr}
+  .node-card{padding:12px}
+  .node-tags{position:static;max-width:none;margin-bottom:6px;justify-content:flex-start}
+  .iface-block{padding:10px}
+  .iface-header{gap:8px}
+  .iface-name{min-width:52px}
+  .iface-band{flex:1;min-width:90px}
+  .iface-controls{width:100%;display:grid;grid-template-columns:1fr}
+  .txpwr-row{padding-left:0;display:grid;grid-template-columns:auto 72px auto 1fr;align-items:center}
+  .txpwr-row input{width:72px!important}
+  .txpwr-row .btn{width:auto}
+  .pairs-grid{padding:10px;grid-template-columns:1fr}
+  .pair-row label{min-width:0;overflow-wrap:anywhere}
+  .tests-wrap{padding:10px;display:grid;grid-template-columns:1fr;gap:6px}
+  .test-chip{width:100%;min-width:0}
+  .session-row{padding:10px;align-items:flex-start}
+  .session-label,.session-count,.session-actions{width:100%}
+  .session-actions{display:grid;grid-template-columns:1fr 1fr}
+  .upload-card{padding:12px;align-items:flex-start}
+  .upload-info,.upload-card .btn{width:100%}
+  .upload-sub{overflow-wrap:anywhere}
+  table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+}
 """
 
 JS = """
@@ -632,30 +827,6 @@ function renderTopology() {
       ${bat}
     </div>`;
   }
-
-  // Hop matrix
-  const hm = document.getElementById('hop-matrix');
-  if (_topo.hop_matrix && _topo.nodes.length > 1) {
-    const nodes = _topo.nodes;
-    let html = '<table><thead><tr><th></th>';
-    for (const dst of nodes) html += `<th>${dst.hostname}</th>`;
-    html += '</tr></thead><tbody>';
-    for (const src of nodes) {
-      html += `<tr><td style="color:var(--text);font-weight:bold">${src.hostname}</td>`;
-      for (const dst of nodes) {
-        if (src.id === dst.id) { html += '<td style="color:var(--border)">—</td>'; continue; }
-        const h = _topo.hop_matrix[`${src.id}-${dst.id}`];
-        const v = h != null ? h : '?';
-        html += `<td><span class="badge b-hop">${v} hop${v !== 1 ? 's' : ''}</span></td>`;
-      }
-      html += '</tr>';
-    }
-    html += '</tbody></table>';
-    hm.innerHTML = html;
-  } else {
-    hm.innerHTML = '<span style="color:var(--muted);font-size:11px">Hop data unavailable</span>';
-  }
-
   // Internet + upload buttons
   const inet = document.getElementById('hdr-inet');
   if (_topo.internet) { inet.textContent = '● INET OK'; inet.className = 'ok'; }
@@ -776,13 +947,10 @@ function updatePairs() {
       if (i === j) continue;
       const src = nodes[i], dst = nodes[j];
       const key = `${src.id}-${dst.id}`;
-      const hops = (_topo.hop_matrix || {})[key];
-      const hopBadge = hops != null ? `<span class="badge badge-hop">${hops} hop${hops>1?'s':''}</span>` : '';
       wrap.innerHTML += `
         <div class="pair-row">
-          <input type="checkbox" id="pair-${key}" value="${key}" data-src="${src.ip}" data-dst="${dst.ip}" data-src-name="${src.hostname}" data-dst-name="${dst.hostname}" data-hops="${hops||''}">
+          <input type="checkbox" id="pair-${key}" value="${key}" data-src="${src.ip}" data-dst="${dst.ip}" data-src-name="${src.hostname}" data-dst-name="${dst.hostname}">
           <label for="pair-${key}" style="flex:none;font-size:12px">${src.hostname} → ${dst.hostname}</label>
-          ${hopBadge}
         </div>`;
     }
   }
@@ -798,7 +966,6 @@ async function startMeasurement() {
       src_ip: el.dataset.src, dst_ip: el.dataset.dst,
       src_name: el.dataset.srcName || el.dataset.src,
       dst_name: el.dataset.dstName || el.dataset.dst,
-      hop_count: el.dataset.hops ? parseInt(el.dataset.hops) : null,
     });
   });
   if (!pairs.length) { showMsg('Select at least one test pair', 'err'); return; }
@@ -938,10 +1105,6 @@ def render_dashboard():
       <div class="node-grid" id="node-grid">
         <div style="padding:20px;color:var(--muted);font-size:11px">Loading topology...</div>
       </div>
-    </div>
-    <div class="card">
-      <div class="card-title">Hop Count Matrix</div>
-      <div id="hop-matrix" style="padding:12px 16px;font-size:11px;color:var(--muted)">Loading...</div>
     </div>
   </div>
 
