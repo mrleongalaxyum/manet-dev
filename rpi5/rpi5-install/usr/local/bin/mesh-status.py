@@ -2192,7 +2192,6 @@ def save_pending_config(pkg):
 
 def clear_pending_config():
     try:
-        import os
         os.remove(PENDING_CONFIG_FILE)
     except Exception:
         pass
@@ -3013,7 +3012,6 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 clear_pending_config()
                 # Clear local ACK state
                 try:
-                    import os
                     os.remove('/var/run/mesh_config_ack_version')
                 except Exception:
                     pass
