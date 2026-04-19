@@ -3070,17 +3070,25 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             try:
                 req     = json.loads(body)
                 channel = req.get('channel')
-                bw      = req.get('bw', '2MHz')
+                bw      = req.get('bw', '1MHz')
                 if not channel:
                     self.send_json({'ok': False, 'error': 'Missing channel'})
                     return
                 channel = int(channel)
+                # EU S1G channel index → centre frequency in kHz
+                eu_s1g_freq_khz = {1: 863500, 2: 864500, 3: 865500,
+                                   4: 866500, 5: 867500, 6: 868500}
+                freq_khz = eu_s1g_freq_khz.get(channel)
+                if not freq_khz:
+                    self.send_json({'ok': False, 'error': f'Invalid EU S1G channel {channel}'})
+                    return
+                bw_mhz = int(str(bw).replace('MHz', ''))
                 # bw string → s1g_prim_chwidth value: 1MHz=0, 2MHz=1, 4MHz=2
-                bw_map  = {'1MHz': 0, '2MHz': 1, '4MHz': 2}
-                chwidth = bw_map.get(str(bw), 1)
+                chwidth = {1: 0, 2: 1, 4: 2}.get(bw_mhz, 0)
                 # Write override flag so channel-election.sh doesn't overwrite
                 with open('/var/run/halow-channel-override', 'w') as f:
                     f.write(f'{channel},{bw}')
+                # Update wpa_supplicant conf for persistence across reboots
                 wpa_conf = '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf'
                 with open(wpa_conf) as f:
                     content = f.read()
@@ -3088,9 +3096,17 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 content = re.sub(r'(s1g_prim_chwidth\s*=\s*)\d+', rf'\g<1>{chwidth}', content)
                 with open(wpa_conf, 'w') as f:
                     f.write(content)
-                subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g-wlan2.service'],
-                               timeout=15)
-                self.send_json({'ok': True, 'channel': channel, 'bw': bw})
+                # Apply immediately via morse_cli (no wpa_supplicant restart needed)
+                morse_result = subprocess.run(
+                    ['morse_cli', '-i', 'wlan2', 'channel',
+                     '-c', str(freq_khz), '-o', str(bw_mhz), '-p', str(bw_mhz)],
+                    capture_output=True, text=True, timeout=10
+                )
+                if morse_result.returncode != 0:
+                    # Fall back to wpa_supplicant restart if morse_cli fails
+                    subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g-wlan2.service'],
+                                   timeout=15)
+                self.send_json({'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
