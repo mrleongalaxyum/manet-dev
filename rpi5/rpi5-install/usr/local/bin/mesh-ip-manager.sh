@@ -341,9 +341,10 @@ configure_ebtables_dhcp_isolation() {
 
 # Configure dnsmasq for DHCP on br0
 configure_dnsmasq() {
-    local br0_secondary=$1
-    local dhcp_start=$2
-    local dhcp_end=$3
+    local br0_primary=$1
+    local br0_secondary=$2
+    local dhcp_start=$3
+    local dhcp_end=$4
     local old_gateway=""
     local old_primary=""
 
@@ -376,8 +377,9 @@ dhcp-option=6,$br0_secondary
 domain=mesh.local
 local=/mesh.local/
 
-# manet.local resolves to this node's IP so EUD clients can reach the admin panel
+# manet.local and perf.local resolve to this node's IP so EUD clients can reach the admin panels
 address=/manet.local/$br0_secondary
+address=/perf.local/$br0_secondary
 
 # Upstream DNS for EUD internet access through Ethernet
 server=1.1.1.1
@@ -386,6 +388,14 @@ server=8.8.8.8
 # Log for debugging
 log-dhcp
 EOF
+
+    # Publish perf.local and manet.local via mDNS (avahi static hosts)
+    # avahi is restricted to wlan3 only, so no inter-node conflicts
+    cat > /etc/avahi/hosts <<EOF2
+$br0_primary perf.local
+$br0_primary manet.local
+EOF2
+    systemctl is-active --quiet avahi-daemon && systemctl reload-or-restart avahi-daemon || true
 
     # Ensure dnsmasq is unmasked, enabled, and running
     systemctl unmask dnsmasq.service 2>/dev/null
@@ -536,8 +546,8 @@ case $IPV4_STATE in
             configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
             
             # Configure dnsmasq
-            configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
-            
+            configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
+
             # Save persistent state
             PERSISTENT_IPV4="$BR0_PRIMARY"
             PERSISTENT_CHUNK="$PROPOSED_CHUNK"
@@ -618,7 +628,7 @@ case $IPV4_STATE in
                 if [ "$NEEDS_DNSMASQ_UPDATE" = true ]; then
                     log "DHCP config changed, reconfiguring..."
                     configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
-                    configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
+                    configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
                 fi
             fi
         fi
