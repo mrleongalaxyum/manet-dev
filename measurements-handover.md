@@ -13,6 +13,7 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - Basic auth je isključen za admin UI; `/admin` ne smije otvarati browser login prozor. Runtime control endpointi na `mesh-status.py` nisu admin-form endpointi: dostupni su server-to-server pozivima iz `perf-dashboard.py` za localhost/mesh subnet IP-eve.
 - `perf-dashboard.py` CSS ima mobile breakpoint za uske ekrane: header/nav se lome, kartice i forme idu u jednu kolonu, global action buttons u 2 kolone, a tablice dobivaju horizontalni scroll samo unutar tablice.
 - Measurement i radio config akcije daju foreground overlay feedback: start/running/failed/completed za mjerenja te applying/failed/applied za HaLow i Wi-Fi channel promjene.
+- Measurement progress prikazuje lagane status brojke bez dodatnog radio opterećenja: completed/total, elapsed, current pair/test, current elapsed i zadnji završeni rezultat. Saved sessions prikazuje simple avg/min/max sažetak za TCP/UDP Mbps, RTT, jitter i loss kad su metrike dostupne.
 - Hop matrix tablica i hop-count računanje su uklonjeni iz perf dashboarda; hop/multihop vizualizacija ostaje u glavnom `mesh-status.py` topology prikazu.
 - HaLow runtime info se prvo pokušava čitati kroz Morse driver tooling (`morse_cli` channel info, JSON ili parsable text), jer `iw` može prijaviti krivi standardni Wi-Fi kanal. `wpa_supplicant_s1g` config ostaje samo fallback/debug.
 

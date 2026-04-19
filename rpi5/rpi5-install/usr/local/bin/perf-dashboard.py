@@ -48,7 +48,11 @@ HALOW_BW_OPTIONS  = ['1MHz', '2MHz', '4MHz']
 
 # Active measurement state
 _measure_lock   = threading.Lock()
-_measure_status = {'running': False, 'label': '', 'progress': '', 'error': ''}
+_measure_status = {
+    'running': False, 'label': '', 'progress': '', 'error': '',
+    'done': 0, 'total': 0, 'started_at': None, 'current_started_at': None,
+    'current': None, 'last_result': None,
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -404,7 +408,12 @@ def list_sessions():
         d = os.path.join(SESSIONS_DIR, name)
         if os.path.isdir(d):
             files = [f for f in os.listdir(d) if f.endswith('.json')]
-            sessions.append({'label': name, 'tests': len(files)})
+            results = get_session_results(name)
+            sessions.append({
+                'label': name,
+                'tests': len(files),
+                'summary': summarize_session_results(results),
+            })
     return sessions
 
 def get_session_results(label):
@@ -467,6 +476,42 @@ def session_to_csv(label):
         ])
     return output.getvalue()
 
+def _stats(values):
+    nums = [float(v) for v in values if v is not None]
+    if not nums:
+        return None
+    return {
+        'avg': round(sum(nums) / len(nums), 2),
+        'min': round(min(nums), 2),
+        'max': round(max(nums), 2),
+        'n': len(nums),
+    }
+
+def summarize_session_results(results):
+    metrics = {
+        'tcp_mbps': [], 'udp_mbps': [], 'jitter_ms': [],
+        'loss_pct': [], 'rtt_avg': [],
+    }
+    ok = fail = 0
+    for record in results:
+        if record.get('ok'):
+            ok += 1
+        else:
+            fail += 1
+        summary = summarize_measurement_result(record)
+        for key in metrics:
+            if summary.get(key) is not None:
+                metrics[key].append(summary.get(key))
+    return {
+        'ok': ok,
+        'fail': fail,
+        'tcp_mbps': _stats(metrics['tcp_mbps']),
+        'udp_mbps': _stats(metrics['udp_mbps']),
+        'jitter_ms': _stats(metrics['jitter_ms']),
+        'loss_pct': _stats(metrics['loss_pct']),
+        'rtt_avg': _stats(metrics['rtt_avg']),
+    }
+
 def snapshot_topology():
     """Lightweight topology snapshot for embedding in test results."""
     active = get_bat0_active_ifaces()
@@ -478,6 +523,40 @@ def snapshot_topology():
         'halow_bw':       iw2.get('halow_bw', ''),
         'ch_2g':          iw0.get('channel', ''),
     }
+
+def summarize_measurement_result(record):
+    summary = {
+        'test_type': record.get('test_type', ''),
+        'src': record.get('source_node', ''),
+        'dst': record.get('destination_node', ''),
+        'ok': record.get('ok', False),
+    }
+    if record.get('error'):
+        summary['error'] = record.get('error')
+
+    iperf = record.get('iperf3_result') or {}
+    ping = record.get('ping_result') or {}
+    try:
+        end = iperf.get('end', {})
+        if 'sum_received' in end:
+            summary['tcp_mbps'] = round(end['sum_received'].get('bits_per_second', 0) / 1e6, 2)
+        if 'sum_sent' in end and 'tcp_mbps' not in summary:
+            summary['tcp_mbps'] = round(end['sum_sent'].get('bits_per_second', 0) / 1e6, 2)
+        if 'sum' in end:
+            s = end['sum']
+            if s.get('bits_per_second') is not None:
+                summary['udp_mbps'] = round(s.get('bits_per_second', 0) / 1e6, 2)
+            if s.get('jitter_ms') is not None:
+                summary['jitter_ms'] = round(s.get('jitter_ms', 0), 3)
+            if s.get('lost_percent') is not None:
+                summary['loss_pct'] = round(s.get('lost_percent', 0), 2)
+    except Exception:
+        pass
+
+    for key in ('rtt_avg', 'rtt_min', 'rtt_max', 'loss_pct'):
+        if ping.get(key) is not None:
+            summary[key] = ping.get(key)
+    return summary
 
 def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
     """Run all test combinations. Blocking — call in thread."""
@@ -498,8 +577,21 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             dst_name = pair['dst_name']
 
             for test_type in tests:
+                now = int(time.time())
                 with _measure_lock:
-                    _measure_status['progress'] = f'{src_name}→{dst_name} {test_type} ({done+1}/{total})'
+                    _measure_status.update({
+                        'progress': f'{src_name}→{dst_name} {test_type} ({done+1}/{total})',
+                        'done': done,
+                        'total': total,
+                        'current_started_at': now,
+                        'current': {
+                            'src': src_name,
+                            'dst': dst_name,
+                            'test_type': test_type,
+                            'index': done + 1,
+                            'total': total,
+                        },
+                    })
 
                 ts    = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
                 fname = f'{ts}_{src_name}_{dst_name}_{test_type}.json'
@@ -554,17 +646,28 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     json.dump(result_record, f, indent=2)
 
                 done += 1
+                with _measure_lock:
+                    _measure_status.update({
+                        'done': done,
+                        'total': total,
+                        'last_result': summarize_measurement_result(result_record),
+                    })
                 time.sleep(2)  # brief pause between tests
 
         with _measure_lock:
             _measure_status['running']  = False
             _measure_status['progress'] = f'Done — {done} tests saved'
             _measure_status['error']    = ''
+            _measure_status['done']     = done
+            _measure_status['total']    = total
+            _measure_status['current']  = None
+            _measure_status['current_started_at'] = None
     except Exception as e:
         with _measure_lock:
             _measure_status['running']  = False
             _measure_status['progress'] = f'Failed after {done} test(s)'
             _measure_status['error']    = str(e)
+            _measure_status['done']     = done
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HTML
@@ -716,6 +819,12 @@ tr:hover td{background:#0f1923}
 .progress-text{font-size:12px;color:var(--accent);margin-top:6px;min-height:18px}
 .progress-text.done{color:var(--green)}
 .progress-text.err{color:var(--red)}
+.progress-stats{margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px}
+.stat-chip{border:1px solid var(--border2);background:#060c12;padding:7px 9px;font-size:10px;color:var(--muted);min-height:38px}
+.stat-chip strong{display:block;color:var(--text);font-size:12px;margin-top:2px;overflow-wrap:anywhere}
+.stat-chip.good strong{color:var(--green)}
+.stat-chip.warn strong{color:var(--orange)}
+.stat-chip.bad strong{color:var(--red)}
 
 /* msg */
 #msg{padding:10px 16px;font-size:12px;display:none;margin-bottom:16px;border-left:3px solid;letter-spacing:.3px}
@@ -742,6 +851,9 @@ tr:hover td{background:#0f1923}
 .session-label{flex:1;font-size:13px}
 .session-count{font-size:11px;color:var(--muted)}
 .session-actions{display:flex;gap:6px}
+.session-summary{width:100%;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px;margin-top:4px}
+.metric-mini{background:#060c12;border:1px solid var(--border2);padding:6px 8px;font-size:10px;color:var(--muted)}
+.metric-mini strong{display:block;color:var(--text);font-size:11px;margin-top:2px}
 
 /* upload */
 .upload-card{padding:16px;display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border2);flex-wrap:wrap}
@@ -787,6 +899,7 @@ tr:hover td{background:#0f1923}
   .test-chip{width:100%;min-width:0}
   .session-row{padding:10px;align-items:flex-start}
   .session-label,.session-count,.session-actions{width:100%}
+  .progress-stats,.session-summary{grid-template-columns:1fr}
   .session-actions{display:grid;grid-template-columns:1fr 1fr}
   .upload-card{padding:12px;align-items:flex-start}
   .upload-info,.upload-card .btn{width:100%}
@@ -865,6 +978,49 @@ function setProgress(text, state) {
   fill.className = 'progress-bar-fill' + (state === 'running' ? ' running' : '');
   fill.style.background = state === 'err' ? 'var(--red)' : state === 'done' ? 'var(--green)' : 'var(--accent)';
   fill.style.width = state === 'running' ? '60%' : state ? '100%' : '0';
+}
+
+function fmtSecs(seconds) {
+  seconds = Math.max(0, Math.floor(seconds || 0));
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m ? `${m}m ${s}s` : `${s}s`;
+}
+
+function metricText(stats, unit) {
+  if (!stats || stats.avg == null) return '';
+  return `avg ${stats.avg}${unit} / min ${stats.min}${unit} / max ${stats.max}${unit}`;
+}
+
+function lastResultText(r) {
+  if (!r) return 'waiting for first completed test';
+  const parts = [];
+  if (r.tcp_mbps != null) parts.push(`TCP ${r.tcp_mbps} Mbps`);
+  if (r.udp_mbps != null) parts.push(`UDP ${r.udp_mbps} Mbps`);
+  if (r.rtt_avg != null) parts.push(`RTT ${r.rtt_avg} ms`);
+  if (r.jitter_ms != null) parts.push(`jitter ${r.jitter_ms} ms`);
+  if (r.loss_pct != null) parts.push(`loss ${r.loss_pct}%`);
+  if (r.error) parts.push(r.error);
+  const metrics = parts.length ? parts.join(' · ') : (r.ok ? 'ok' : 'failed');
+  return `${r.src} -> ${r.dst} ${r.test_type}: ${metrics}`;
+}
+
+function renderMeasureStats(d) {
+  const el = document.getElementById('progress-stats');
+  if (!el) return;
+  const now = Math.floor(Date.now() / 1000);
+  const done = d.done || 0;
+  const total = d.total || 0;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const elapsed = d.started_at ? fmtSecs(now - d.started_at) : '0s';
+  const curElapsed = d.current_started_at ? fmtSecs(now - d.current_started_at) : '-';
+  const cur = d.current ? `${d.current.src} -> ${d.current.dst} ${d.current.test_type}` : '-';
+  el.innerHTML = `
+    <div class="stat-chip"><span>completed</span><strong>${done}/${total} (${pct}%)</strong></div>
+    <div class="stat-chip"><span>elapsed</span><strong>${elapsed}</strong></div>
+    <div class="stat-chip"><span>current</span><strong>${cur}</strong></div>
+    <div class="stat-chip"><span>current time</span><strong>${curElapsed}</strong></div>
+    <div class="stat-chip ${d.last_result && d.last_result.ok ? 'good' : ''}" style="grid-column:1/-1"><span>last result</span><strong>${lastResultText(d.last_result)}</strong></div>`;
 }
 
 function showTab(name) {
@@ -1126,14 +1282,17 @@ async function pollStatus() {
     if (d.running) {
       setRunButton(true, 'RUNNING...');
       setProgress(d.progress || 'Running...', 'running');
+      renderMeasureStats(d);
       _pollTimer = setTimeout(pollStatus, 2000);
     } else if (d.error) {
       setRunButton(false);
       setProgress('Error: ' + d.error, 'err');
+      renderMeasureStats(d);
       showMsg('Error: ' + d.error, 'err');
     } else {
       setRunButton(false);
       setProgress(d.progress || 'Measurement complete — results saved.', 'done');
+      renderMeasureStats(d);
       showMsg('Measurement complete — results saved.', 'ok');
       loadSessions();
     }
@@ -1156,14 +1315,26 @@ async function loadSessions() {
   list.innerHTML = d.map(s => `
     <div class="session-row">
       <div class="session-label">${s.label}</div>
-      <div class="session-count">${s.tests} test${s.tests !== 1 ? 's' : ''}</div>
+      <div class="session-count">${s.tests} test${s.tests !== 1 ? 's' : ''} · ${s.summary?.ok || 0} ok / ${s.summary?.fail || 0} fail</div>
       <div class="session-actions">
         <a href="/api/sessions/${encodeURIComponent(s.label)}/csv" download="${s.label}.csv"
            class="btn" style="text-decoration:none;font-size:10px">CSV</a>
         <a href="/api/sessions/${encodeURIComponent(s.label)}" target="_blank"
            class="btn" style="text-decoration:none;font-size:10px">JSON</a>
       </div>
+      <div class="session-summary">
+        ${sessionMetric('TCP', s.summary?.tcp_mbps, ' Mbps')}
+        ${sessionMetric('UDP', s.summary?.udp_mbps, ' Mbps')}
+        ${sessionMetric('RTT', s.summary?.rtt_avg, ' ms')}
+        ${sessionMetric('JITTER', s.summary?.jitter_ms, ' ms')}
+        ${sessionMetric('LOSS', s.summary?.loss_pct, '%')}
+      </div>
     </div>`).join('');
+}
+
+function sessionMetric(label, stats, unit) {
+  const txt = metricText(stats, unit);
+  return `<div class="metric-mini">${label}<strong>${txt || '-'}</strong></div>`;
 }
 
 async function uploadGithub() {
@@ -1354,6 +1525,7 @@ def render_dashboard():
       <div class="progress-wrap">
         <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-fill"></div></div>
         <div class="progress-text" id="progress-text"></div>
+        <div class="progress-stats" id="progress-stats"></div>
       </div>
     </div>
   </div>
@@ -1569,6 +1741,12 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                     _measure_status['label']    = label
                     _measure_status['progress'] = 'Starting...'
                     _measure_status['error']    = ''
+                    _measure_status['done']     = 0
+                    _measure_status['total']    = len(pairs) * len(tests)
+                    _measure_status['started_at'] = int(time.time())
+                    _measure_status['current_started_at'] = None
+                    _measure_status['current'] = None
+                    _measure_status['last_result'] = None
                     t = threading.Thread(
                         target=run_measurement_session,
                         args=(label, pairs, tests, dur, bitrate),
