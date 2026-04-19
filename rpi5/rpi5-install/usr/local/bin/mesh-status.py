@@ -2597,7 +2597,40 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _proxy_to_perf(self):
+        import urllib.request as _ur
+        target = 'http://127.0.0.1:8081' + self.path
+        req = _ur.Request(target, method=self.command)
+        for k, v in self.headers.items():
+            if k.lower() not in ('host', 'content-length'):
+                req.add_header(k, v)
+        length = int(self.headers.get('Content-Length', 0))
+        data = self.rfile.read(length) if length else None
+        if data:
+            req.data = data
+            req.add_header('Content-Length', str(len(data)))
+        try:
+            with _ur.urlopen(req, timeout=30) as resp:
+                self.send_response(resp.status)
+                for k, v in resp.headers.items():
+                    if k.lower() not in ('transfer-encoding',):
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(resp.read())
+        except Exception as e:
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
+    def _is_perf_host(self):
+        host = self.headers.get('Host', '').split(':')[0].lower()
+        return host == 'perf.local' or host == 'perf'
+
     def do_GET(self):
+        if self._is_perf_host():
+            self._proxy_to_perf()
+            return
+
         conf       = load_kv_file(MESH_CONF_FILE)
         client_ip  = self.client_address[0]
         parsed     = urlparse(self.path)
@@ -2704,6 +2737,10 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'Not found')
 
     def do_POST(self):
+        if self._is_perf_host():
+            self._proxy_to_perf()
+            return
+
         conf      = load_kv_file(MESH_CONF_FILE)
         parsed    = urlparse(self.path)
         path      = parsed.path.rstrip('/') or '/'
