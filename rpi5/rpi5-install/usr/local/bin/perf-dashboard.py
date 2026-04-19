@@ -1183,20 +1183,28 @@ async function applyHalow() {
   const ch = document.getElementById('halow-ch').value;
   const bw = document.getElementById('halow-bw').value;
   setButtonBusy('btn-apply-halow', true, 'APPLYING...', 'APPLY TO ALL NODES');
-  showOverlay(`Applying HaLow ${ch} / ${bw} to all nodes...`, 'info');
-  showMsg(`Applying HaLow ${ch} / ${bw} to all nodes...`, 'info');
+  showOverlay(`Applying HaLow ch${ch} / ${bw} — verifying all nodes...`, 'info');
   try {
     const r = await fetch('/api/halow/channel', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({interface: 'wlan2', channel: parseInt(ch), bw})
+      body: JSON.stringify({channel: parseInt(ch), bw})
     });
     const d = await r.json();
-    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    showMsg('HaLow channel applied to all nodes', 'ok');
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    if (!d.ok) {
+      const msg = d.rolled_back
+        ? `ROLLED BACK — ${d.error}` + (d.unreachable?.length ? ` · not in mesh: ${d.unreachable.join(', ')}` : '')
+        : d.error;
+      showMsg(msg, 'err');
+      return;
+    }
+    let msg = `HaLow ch${ch} / ${bw} applied to: ${d.applied?.join(', ')}`;
+    if (d.unreachable?.length) msg += ` · WARNING: not in mesh: ${d.unreachable.join(', ')}`;
+    showMsg(msg, d.unreachable?.length ? 'info' : 'ok');
     await fetchTopo();
   } catch (e) {
-    showMsg('HaLow channel failed: ' + e.message, 'err');
+    showMsg('HaLow apply failed: ' + e.message, 'err');
   } finally {
     setButtonBusy('btn-apply-halow', false, '', 'APPLY TO ALL NODES');
   }
@@ -1798,20 +1806,87 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/halow/channel':
             try:
-                req = json.loads(body)
+                req       = json.loads(body)
+                new_ch    = int(req.get('channel', 0))
+                new_bw    = req.get('bw', '1MHz')
+                if not new_ch:
+                    self.send_json({'ok': False, 'error': 'Missing channel'})
+                    return
+
                 nodes_raw = parse_registry()
-                errors = []
+                # Step 1: probe reachable nodes via mesh IP and snapshot current channel
+                # Nodes not reachable through mesh will timeout — no ethernet fallback
+                reachable = []   # {hostname, ip, old_ch, old_bw}
+                unreachable = [] # hostnames
                 for nd in nodes_raw.values():
-                    ip = nd.get('IPV4_ADDRESS', '')
+                    ip       = nd.get('IPV4_ADDRESS', '')
+                    hostname = nd.get('HOSTNAME', ip)
                     if not ip:
                         continue
-                    r = call_node_api(ip, '/api/control/halow_channel', 'POST', req)
-                    if not r.get('ok'):
-                        errors.append(f"{ip}: {r.get('error')}")
-                if errors:
-                    self.send_json({'ok': False, 'error': '; '.join(errors)})
-                else:
-                    self.send_json({'ok': True})
+                    local = call_node_api(ip, '/api/local', timeout=4)
+                    if 'error' in local and local.get('ok') is False:
+                        unreachable.append(hostname)
+                        continue
+                    ifaces = {i['name']: i for i in local.get('interfaces', []) if 'name' in i}
+                    w2 = ifaces.get('wlan2', {})
+                    reachable.append({
+                        'hostname': hostname,
+                        'ip':       ip,
+                        'old_ch':   w2.get('channel', ''),
+                        'old_bw':   w2.get('halow_bw', ''),
+                    })
+
+                if not reachable:
+                    self.send_json({'ok': False, 'error': 'No reachable nodes'})
+                    return
+
+                # Step 2: apply new channel to all reachable nodes
+                failed = []
+                applied = []
+                for node in reachable:
+                    r = call_node_api(node['ip'], '/api/control/halow_channel', 'POST', req)
+                    if r.get('ok'):
+                        applied.append(node)
+                    else:
+                        failed.append({'hostname': node['hostname'], 'error': r.get('error', 'failed')})
+
+                # Step 3: verify via morse_cli (re-read; retry up to 3x with 2s spacing)
+                verify_failed = []
+                for node in applied:
+                    confirmed = False
+                    for _ in range(3):
+                        time.sleep(2)
+                        local = call_node_api(node['ip'], '/api/local', timeout=5)
+                        ifaces = {i['name']: i for i in local.get('interfaces', []) if 'name' in i}
+                        actual_ch = ifaces.get('wlan2', {}).get('channel', '')
+                        if str(actual_ch) == str(new_ch):
+                            confirmed = True
+                            break
+                    if not confirmed:
+                        verify_failed.append(node['hostname'])
+
+                # Step 4: rollback if any verification failed
+                if verify_failed or failed:
+                    for node in applied:
+                        if node['old_ch']:
+                            call_node_api(node['ip'], '/api/control/halow_channel', 'POST', {
+                                'channel': node['old_ch'], 'bw': node['old_bw'] or '1MHz'
+                            })
+                    err_parts = []
+                    if failed:
+                        err_parts.append('apply failed: ' + ', '.join(f['hostname'] for f in failed))
+                    if verify_failed:
+                        err_parts.append('verify failed: ' + ', '.join(verify_failed))
+                    self.send_json({'ok': False, 'error': '; '.join(err_parts),
+                                    'rolled_back': True,
+                                    'unreachable': unreachable})
+                    return
+
+                result = {'ok': True, 'applied': [n['hostname'] for n in applied]}
+                if unreachable:
+                    result['warning'] = 'Unreachable (not in mesh): ' + ', '.join(unreachable)
+                    result['unreachable'] = unreachable
+                self.send_json(result)
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
