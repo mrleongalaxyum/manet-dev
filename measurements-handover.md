@@ -15,6 +15,8 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - Measurement i radio config akcije daju foreground overlay feedback: start/running/failed/completed za mjerenja te applying/failed/applied za HaLow i Wi-Fi channel promjene.
 - Measurement progress prikazuje lagane status brojke bez dodatnog radio opterećenja: completed/total, elapsed, current pair/test, current elapsed i zadnji završeni rezultat. Saved sessions prikazuje simple avg/min/max sažetak za TCP/UDP Mbps, RTT, jitter i loss kad su metrike dostupne.
 - Saved sessions imaju `DELETE` akciju s browser confirmation dialogom prije brisanja cijele sesije.
+- `perf.local` proxy u `mesh-status.py` mora prosljeđivati i `DELETE`, inače brisanje sesije kroz port 80 vrati HTML/501 pa frontend prijavi da odgovor nije validan JSON.
+- Aktivni dashboard tab se sprema u `localStorage` (`perfDashboardTab`) da refresh stranice ostane na istom tabu.
 - Dugi iperf/ping control pozivi moraju imati timeout dulji od trajanja testa. Kratki HTTP timeout uzrokuje lažne `timed out` failove i može ostaviti iperf server zauzet za sljedeći test.
 - Hop matrix tablica i hop-count računanje su uklonjeni iz perf dashboarda; hop/multihop vizualizacija ostaje u glavnom `mesh-status.py` topology prikazu.
 - HaLow runtime info se prvo pokušava čitati kroz Morse driver tooling (`morse_cli` channel info, JSON ili parsable text), jer `iw` može prijaviti krivi standardni Wi-Fi kanal. `wpa_supplicant_s1g` config ostaje samo fallback/debug.
