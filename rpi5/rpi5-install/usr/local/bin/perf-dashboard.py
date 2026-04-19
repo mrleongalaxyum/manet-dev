@@ -1309,10 +1309,50 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+AVAHI_PERF_SERVICE = '/etc/avahi/services/perf-http.service'
+AVAHI_PERF_CONTENT = """<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name>MANET Perf Dashboard</name>
+  <host-name>perf.local</host-name>
+  <service>
+    <type>_http._tcp</type>
+    <port>8081</port>
+  </service>
+</service-group>
+"""
+
+def _is_gateway():
+    return os.path.exists('/var/run/mesh-gateway.state')
+
+def _manage_avahi_perf():
+    """Run in background thread: install/remove avahi perf.local based on gateway status."""
+    last = None
+    while True:
+        gw = _is_gateway()
+        if gw != last:
+            try:
+                if gw:
+                    with open(AVAHI_PERF_SERVICE, 'w') as f:
+                        f.write(AVAHI_PERF_CONTENT)
+                    subprocess.run(['systemctl', 'reload', 'avahi-daemon'], timeout=5, capture_output=True)
+                else:
+                    if os.path.exists(AVAHI_PERF_SERVICE):
+                        os.remove(AVAHI_PERF_SERVICE)
+                        subprocess.run(['systemctl', 'reload', 'avahi-daemon'], timeout=5, capture_output=True)
+            except Exception:
+                pass
+            last = gw
+        time.sleep(30)
+
 if __name__ == '__main__':
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+    t = threading.Thread(target=_manage_avahi_perf, daemon=True)
+    t.start()
+
     server = ThreadedServer(('0.0.0.0', port), PerfHandler)
     print(f'MANET Perf Dashboard listening on port {port}')
     try:
