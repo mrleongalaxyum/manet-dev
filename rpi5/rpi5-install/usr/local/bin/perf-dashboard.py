@@ -16,7 +16,7 @@ Endpoints:
   GET  /api/sessions/<id>       - Get session JSON
   GET  /api/sessions/<id>/csv   - Get session CSV
   POST /api/upload/github       - Git push measurements/
-  POST /api/upload/ventum       - SCP to Ventum
+  POST /api/upload/ventum       - curl -u upload to Ventum
 """
 
 import http.server
@@ -1249,7 +1249,7 @@ def render_dashboard():
       <div class="upload-card">
         <div class="upload-info">
           <div class="upload-title">Ventum</div>
-          <div class="upload-sub">rsync to colorado-governor.com</div>
+          <div class="upload-sub">curl -u upload to manet.ventum.hr</div>
         </div>
         <button class="btn btn-green" id="upload-ventum" onclick="uploadVentum()" disabled>UPLOAD</button>
       </div>
@@ -1446,15 +1446,35 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/upload/ventum':
             try:
                 conf = load_kv_file('/etc/mesh.conf')
-                ventum_host = conf.get('ventum_host', 'colorado-governor.com')
-                ventum_user = conf.get('ventum_user', 'manet')
-                ventum_path = conf.get('ventum_path', '/var/www/measurements')
+                ventum_url = conf.get('ventum_upload_url', 'https://manet.ventum.hr/upload/rpi5')
+                ventum_auth = conf.get('ventum_auth', '')
+                if not ventum_auth:
+                    user = conf.get('ventum_user', 'clanker')
+                    password = conf.get('ventum_password', 'really-strong-password-321')
+                    ventum_auth = f'{user}:{password}'
+
+                ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+                host = get_my_hostname()
+                archive = f'/tmp/manet-measurements-{host}-{ts}.tar.gz'
+                remote_name = os.path.basename(archive)
+                upload_url = ventum_url.rstrip('/') + '/' + remote_name
+
                 subprocess.run(
-                    ['rsync', '-avz', '-e', 'ssh -o StrictHostKeyChecking=no',
-                     SESSIONS_DIR + '/', f'{ventum_user}@{ventum_host}:{ventum_path}/'],
+                    ['tar', '-C', os.path.dirname(SESSIONS_DIR),
+                     '-czf', archive, os.path.basename(SESSIONS_DIR)],
                     check=True, timeout=60
                 )
-                self.send_json({'ok': True})
+                try:
+                    subprocess.run(
+                        ['curl', '-fS', '-u', ventum_auth, '-T', archive, upload_url],
+                        check=True, timeout=120
+                    )
+                finally:
+                    try:
+                        os.remove(archive)
+                    except Exception:
+                        pass
+                self.send_json({'ok': True, 'file': remote_name, 'url': upload_url})
             except subprocess.CalledProcessError as e:
                 self.send_json({'ok': False, 'error': str(e)})
             except Exception as e:

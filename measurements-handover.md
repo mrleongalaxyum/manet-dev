@@ -146,7 +146,7 @@ sudo batctl if add wlan0
 
 ### 4. Upload rezultata
 - Gumb "Upload to GitHub" — git commit + push novog JSON/CSV
-- Gumb "Upload to Ventum" — rsync/scp na Ventum server
+- Gumb "Upload to Ventum" — spakira `/var/log/manet-measurements` u `tar.gz` i šalje na Ventum HTTP upload preko `curl -u`
 - **Ne uploadati automatski** — samo na eksplicitni zahtjev
 
 ### 5. Pregled prošlih mjerenja
@@ -239,7 +239,7 @@ GET  /api/measure/status        # Status tekućeg mjerenja
 GET  /api/sessions              # Lista prošlih sesija
 GET  /api/sessions/<id>         # Dohvati rezultate sesije
 POST /api/upload/github         # Git push rezultata
-POST /api/upload/ventum         # SCP na Ventum
+POST /api/upload/ventum         # curl -u upload tar.gz bundlea na Ventum
 ```
 
 ### Control API na svakom nodu (dodati u mesh-status.py)
@@ -290,4 +290,5 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
 ## Ventum / GitHub pristup
 
 - GitHub: `mrleongalaxyum/manet-dev` (public) — measurements u `measurements/` folderu
-- Ventum: detalji u `handover.md` (SFTP/SCP credentials)
+- Ventum measurements upload: `curl -u <user>:<password> -T <file> https://manet.ventum.hr/upload/rpi5/<file>`
+- Runtime config overridei u `/etc/mesh.conf`: `ventum_upload_url`, `ventum_auth` ili `ventum_user` + `ventum_password`
