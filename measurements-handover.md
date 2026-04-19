@@ -12,6 +12,7 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - `mesh-status.py` je proširen control endpointima za interface toggle, tx power, HaLow channel, iperf server/client i ping.
 - Basic auth je isključen za admin UI; `/admin` ne smije otvarati browser login prozor. Runtime control endpointi na `mesh-status.py` nisu admin-form endpointi: dostupni su server-to-server pozivima iz `perf-dashboard.py` za localhost/mesh subnet IP-eve.
 - `perf-dashboard.py` CSS ima mobile breakpoint za uske ekrane: header/nav se lome, kartice i forme idu u jednu kolonu, global action buttons u 2 kolone, a tablice dobivaju horizontalni scroll samo unutar tablice.
+- Measurement i radio config akcije daju foreground overlay feedback: start/running/failed/completed za mjerenja te applying/failed/applied za HaLow i Wi-Fi channel promjene.
 - Hop matrix tablica i hop-count računanje su uklonjeni iz perf dashboarda; hop/multihop vizualizacija ostaje u glavnom `mesh-status.py` topology prikazu.
 - HaLow runtime info se prvo pokušava čitati kroz Morse driver tooling (`morse_cli` channel info, JSON ili parsable text), jer `iw` može prijaviti krivi standardni Wi-Fi kanal. `wpa_supplicant_s1g` config ostaje samo fallback/debug.
 
@@ -233,6 +234,7 @@ GET  /                          # Dashboard HTML
 GET  /api/topology              # Trenutna topologija (nodovi, interfacei, gateway/internet)
 POST /api/interface/toggle      # Toggle wlan interface na nodu(ovima)
 POST /api/halow/channel         # Postavi HaLow kanal/BW na sve nodove
+POST /api/wifi/channel          # Postavi 2.4/5 GHz kanal na sve nodove
 POST /api/txpower               # Postavi TX power po nodu/interfaceu
 POST /api/measure/start         # Pokretanje iperf3 sesije
 GET  /api/measure/status        # Status tekućeg mjerenja
@@ -248,6 +250,7 @@ Control API je mesh-local/server-to-server: dozvoljen je samo za localhost ili I
 ```
 POST /api/control/interface     # { "iface": "wlan0", "state": "up"|"down" }
 POST /api/control/halow_channel # { "channel": 42, "bw": "2MHz" }
+POST /api/control/wifi_channel  # { "interface": "wlan0", "channel": 6 }
 POST /api/control/txpower       # { "iface": "wlan0", "dbm": 15 }
 POST /api/iperf/server/start    # Pokreni iperf3 -s
 POST /api/iperf/server/stop

@@ -9,6 +9,7 @@ Endpoints:
   GET  /api/topology            - Mesh topology (nodes, interfaces)
   POST /api/interface/toggle    - Toggle wlan interface on node(s)
   POST /api/halow/channel       - Set HaLow channel/BW on all nodes
+  POST /api/wifi/channel        - Set Wi-Fi channel on all nodes
   POST /api/txpower             - Set TX power on node/interface
   POST /api/measure/start       - Start iperf3/ping session
   GET  /api/measure/status      - Current measurement status
@@ -481,76 +482,89 @@ def snapshot_topology():
 def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
     """Run all test combinations. Blocking — call in thread."""
     global _measure_status
-    ensure_sessions_dir()
-    session_dir = os.path.join(SESSIONS_DIR, label)
-    os.makedirs(session_dir, exist_ok=True)
-    topo = snapshot_topology()
+    done = 0
+    try:
+        ensure_sessions_dir()
+        session_dir = os.path.join(SESSIONS_DIR, label)
+        os.makedirs(session_dir, exist_ok=True)
+        topo = snapshot_topology()
 
-    total = len(pairs) * len(tests)
-    done  = 0
+        total = len(pairs) * len(tests)
 
-    for pair in pairs:
-        src_ip   = pair['src_ip']
-        dst_ip   = pair['dst_ip']
-        src_name = pair['src_name']
-        dst_name = pair['dst_name']
+        for pair in pairs:
+            src_ip   = pair['src_ip']
+            dst_ip   = pair['dst_ip']
+            src_name = pair['src_name']
+            dst_name = pair['dst_name']
 
-        for test_type in tests:
-            with _measure_lock:
-                _measure_status['progress'] = f'{src_name}→{dst_name} {test_type} ({done+1}/{total})'
+            for test_type in tests:
+                with _measure_lock:
+                    _measure_status['progress'] = f'{src_name}→{dst_name} {test_type} ({done+1}/{total})'
 
-            ts    = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-            fname = f'{ts}_{src_name}_{dst_name}_{test_type}.json'
-            result_record = {
-                'session_label':    label,
-                'timestamp':        datetime.now(timezone.utc).isoformat(),
-                'test_type':        test_type,
-                'source_node':      src_name,
-                'destination_node': dst_name,
-                'active_interfaces': topo['active_interfaces'],
-                'halow_channel':    topo['halow_channel'],
-                'halow_bw':         topo['halow_bw'],
-                'ch_2g':            topo['ch_2g'],
-                'gps_source':       None,
-                'gps_destination':  None,
-            }
+                ts    = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+                fname = f'{ts}_{src_name}_{dst_name}_{test_type}.json'
+                result_record = {
+                    'session_label':    label,
+                    'timestamp':        datetime.now(timezone.utc).isoformat(),
+                    'test_type':        test_type,
+                    'source_node':      src_name,
+                    'destination_node': dst_name,
+                    'active_interfaces': topo['active_interfaces'],
+                    'halow_channel':    topo['halow_channel'],
+                    'halow_bw':         topo['halow_bw'],
+                    'ch_2g':            topo['ch_2g'],
+                    'gps_source':       None,
+                    'gps_destination':  None,
+                }
 
-            if test_type == 'icmp_ping':
-                # Run ping locally toward dst
-                resp = call_node_api(src_ip, '/api/ping/run', 'POST', {
-                    'target': dst_ip, 'count': 100, 'interval': 0.2
-                })
-                result_record['ping_result'] = resp.get('result')
-                result_record['ok'] = resp.get('ok', False)
-            else:
-                # Start iperf3 server on dst, run client on src
-                call_node_api(dst_ip, '/api/iperf/server/start', 'POST', {})
-                time.sleep(1)
+                if test_type == 'icmp_ping':
+                    # Run ping locally toward dst
+                    resp = call_node_api(src_ip, '/api/ping/run', 'POST', {
+                        'target': dst_ip, 'count': 100, 'interval': 0.2
+                    })
+                    result_record['ping_result'] = resp.get('result')
+                    result_record['ok'] = resp.get('ok', False)
+                    if not result_record['ok']:
+                        result_record['error'] = resp.get('error', 'ping failed')
+                else:
+                    # Start iperf3 server on dst, run client on src
+                    server_resp = call_node_api(dst_ip, '/api/iperf/server/start', 'POST', {})
+                    if not server_resp.get('ok'):
+                        raise RuntimeError(f'{dst_name} iperf server failed: {server_resp.get("error")}')
+                    time.sleep(1)
 
-                reverse = test_type == 'reverse'
-                parallel = 4 if test_type == 'tcp_4stream' else 1
-                resp = call_node_api(src_ip, '/api/iperf/client/run', 'POST', {
-                    'server_ip':  dst_ip,
-                    'test_type':  test_type,
-                    'duration':   duration,
-                    'bitrate':    udp_bitrate,
-                    'parallel':   parallel,
-                    'reverse':    reverse,
-                })
-                result_record['iperf3_result'] = resp.get('result')
-                result_record['ok'] = resp.get('ok', False)
-                call_node_api(dst_ip, '/api/iperf/server/stop', 'POST', {})
+                    reverse = test_type == 'reverse'
+                    parallel = 4 if test_type == 'tcp_4stream' else 1
+                    resp = call_node_api(src_ip, '/api/iperf/client/run', 'POST', {
+                        'server_ip':  dst_ip,
+                        'test_type':  test_type,
+                        'duration':   duration,
+                        'bitrate':    udp_bitrate,
+                        'parallel':   parallel,
+                        'reverse':    reverse,
+                    })
+                    result_record['iperf3_result'] = resp.get('result')
+                    result_record['ok'] = resp.get('ok', False)
+                    if not result_record['ok']:
+                        result_record['error'] = resp.get('error', 'iperf client failed')
+                    call_node_api(dst_ip, '/api/iperf/server/stop', 'POST', {})
 
-            # Save result
-            with open(os.path.join(session_dir, fname), 'w') as f:
-                json.dump(result_record, f, indent=2)
+                # Save result
+                with open(os.path.join(session_dir, fname), 'w') as f:
+                    json.dump(result_record, f, indent=2)
 
-            done += 1
-            time.sleep(2)  # brief pause between tests
+                done += 1
+                time.sleep(2)  # brief pause between tests
 
-    with _measure_lock:
-        _measure_status['running']  = False
-        _measure_status['progress'] = f'Done — {done} tests saved'
+        with _measure_lock:
+            _measure_status['running']  = False
+            _measure_status['progress'] = f'Done — {done} tests saved'
+            _measure_status['error']    = ''
+    except Exception as e:
+        with _measure_lock:
+            _measure_status['running']  = False
+            _measure_status['progress'] = f'Failed after {done} test(s)'
+            _measure_status['error']    = str(e)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HTML
@@ -697,6 +711,8 @@ tr:hover td{background:#0f1923}
 .progress-label{font-size:11px;color:var(--muted);margin-bottom:6px;letter-spacing:.5px}
 .progress-bar-bg{height:3px;background:#1a2e42;position:relative}
 .progress-bar-fill{height:3px;background:var(--accent);box-shadow:0 0 6px var(--accent);transition:width .3s;width:0}
+.progress-bar-fill.running{animation:progressPulse 1.2s ease-in-out infinite}
+@keyframes progressPulse{0%{width:15%;opacity:.55}50%{width:80%;opacity:1}100%{width:15%;opacity:.55}}
 .progress-text{font-size:12px;color:var(--accent);margin-top:6px;min-height:18px}
 .progress-text.done{color:var(--green)}
 .progress-text.err{color:var(--red)}
@@ -706,6 +722,19 @@ tr:hover td{background:#0f1923}
 #msg.ok  {border-color:var(--green);color:var(--green);background:#00ff8808;display:block}
 #msg.err {border-color:var(--red);  color:var(--red);  background:#ff224408;display:block}
 #msg.info{border-color:var(--accent);color:var(--accent);background:#00e5ff08;display:block}
+
+/* foreground overlay */
+#overlay{position:fixed;left:50%;top:18px;transform:translate(-50%,-130%);z-index:10000;width:min(520px,calc(100vw - 24px));background:#0c1117;border:1px solid var(--accent);box-shadow:0 12px 40px #000b,0 0 22px #00e5ff30;opacity:0;transition:transform .18s ease,opacity .18s ease;pointer-events:none}
+#overlay.show{transform:translate(-50%,0);opacity:1;pointer-events:auto}
+#overlay.ok{border-color:var(--green);box-shadow:0 12px 40px #000b,0 0 22px #00ff8830}
+#overlay.err{border-color:var(--red);box-shadow:0 12px 40px #000b,0 0 22px #ff224430}
+#overlay.info{border-color:var(--accent)}
+.overlay-body{display:flex;align-items:flex-start;gap:10px;padding:12px 14px}
+#overlay-text{flex:1;font-size:12px;line-height:1.35;overflow-wrap:anywhere}
+#overlay-close{background:transparent;border:0;color:var(--muted);font-family:var(--font);font-size:18px;line-height:1;cursor:pointer;padding:0 2px}
+#overlay.ok #overlay-text{color:var(--green)}
+#overlay.err #overlay-text{color:var(--red)}
+#overlay.info #overlay-text{color:var(--accent)}
 
 /* session list */
 .session-row{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border2);flex-wrap:wrap}
@@ -763,12 +792,16 @@ tr:hover td{background:#0f1923}
   .upload-info,.upload-card .btn{width:100%}
   .upload-sub{overflow-wrap:anywhere}
   table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  #overlay{top:10px;width:calc(100vw - 16px)}
 }
 """
 
 JS = """
 let _topo = null;
 let _tab  = 'topology';
+let _msgTimer = null;
+let _pollTimer = null;
+let _overlayTimer = null;
 
 async function fetchTopo() {
   try {
@@ -781,8 +814,57 @@ async function fetchTopo() {
 
 function showMsg(txt, cls) {
   const el = document.getElementById('msg');
-  el.textContent = txt; el.className = cls;
-  setTimeout(() => { el.style.display = 'none'; }, 5000);
+  if (!el) return;
+  clearTimeout(_msgTimer);
+  el.textContent = txt;
+  el.className = cls;
+  el.style.display = 'block';
+  if (cls !== 'info') {
+    _msgTimer = setTimeout(() => { el.style.display = 'none'; }, 8000);
+  }
+  if (cls === 'err' || cls === 'ok') showOverlay(txt, cls);
+}
+
+function showOverlay(txt, cls) {
+  const box = document.getElementById('overlay');
+  const text = document.getElementById('overlay-text');
+  if (!box || !text) return;
+  clearTimeout(_overlayTimer);
+  text.textContent = txt;
+  box.className = (cls || 'info') + ' show';
+  _overlayTimer = setTimeout(hideOverlay, cls === 'err' ? 12000 : 5500);
+}
+
+function hideOverlay() {
+  const box = document.getElementById('overlay');
+  if (box) box.className = box.className.replace(' show', '');
+}
+
+function setRunButton(running, label) {
+  const btn = document.getElementById('btn-run');
+  if (!btn) return;
+  btn.disabled = !!running;
+  btn.textContent = label || (running ? 'RUNNING...' : '▶ RUN MEASUREMENTS');
+}
+
+function setButtonBusy(id, busy, label, idleLabel) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  btn.disabled = !!busy;
+  btn.textContent = busy ? label : idleLabel;
+}
+
+function setProgress(text, state) {
+  const card = document.getElementById('progress-card');
+  const txt  = document.getElementById('progress-text');
+  const fill = document.getElementById('progress-fill');
+  if (!card || !txt || !fill) return;
+  card.style.display = '';
+  txt.textContent = text || '';
+  txt.className = 'progress-text' + (state === 'err' ? ' err' : state === 'done' ? ' done' : '');
+  fill.className = 'progress-bar-fill' + (state === 'running' ? ' running' : '');
+  fill.style.background = state === 'err' ? 'var(--red)' : state === 'done' ? 'var(--green)' : 'var(--accent)';
+  fill.style.width = state === 'running' ? '60%' : state ? '100%' : '0';
 }
 
 function showTab(name) {
@@ -914,26 +996,46 @@ function buildHalowConfig() {}
 async function applyHalow() {
   const ch = document.getElementById('halow-ch').value;
   const bw = document.getElementById('halow-bw').value;
-  const r = await fetch('/api/halow/channel', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({channel: parseInt(ch), bw})
-  });
-  const d = await r.json();
-  if (d.ok) showMsg('HaLow channel applied to all nodes', 'ok');
-  else showMsg('Error: ' + d.error, 'err');
+  setButtonBusy('btn-apply-halow', true, 'APPLYING...', 'APPLY TO ALL NODES');
+  showOverlay(`Applying HaLow ${ch} / ${bw} to all nodes...`, 'info');
+  showMsg(`Applying HaLow ${ch} / ${bw} to all nodes...`, 'info');
+  try {
+    const r = await fetch('/api/halow/channel', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({interface: 'wlan2', channel: parseInt(ch), bw})
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    showMsg('HaLow channel applied to all nodes', 'ok');
+    await fetchTopo();
+  } catch (e) {
+    showMsg('HaLow channel failed: ' + e.message, 'err');
+  } finally {
+    setButtonBusy('btn-apply-halow', false, '', 'APPLY TO ALL NODES');
+  }
 }
 
 async function apply2G() {
   const ch = document.getElementById('ch-2g').value;
-  const r = await fetch('/api/halow/channel', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({interface: 'wlan0', channel: parseInt(ch)})
-  });
-  const d = await r.json();
-  if (d.ok) showMsg('2.4G channel applied to all nodes', 'ok');
-  else showMsg('Error: ' + d.error, 'err');
+  setButtonBusy('btn-apply-2g', true, 'APPLYING...', 'APPLY TO ALL NODES');
+  showOverlay(`Applying 2.4G channel ${ch} to all nodes...`, 'info');
+  showMsg(`Applying 2.4G channel ${ch} to all nodes...`, 'info');
+  try {
+    const r = await fetch('/api/wifi/channel', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({interface: 'wlan0', channel: parseInt(ch)})
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    showMsg('2.4G channel applied to all nodes', 'ok');
+    await fetchTopo();
+  } catch (e) {
+    showMsg('2.4G channel failed: ' + e.message, 'err');
+  } finally {
+    setButtonBusy('btn-apply-2g', false, '', 'APPLY TO ALL NODES');
+  }
 }
 
 // ── Measurements tab ──
@@ -958,7 +1060,11 @@ function updatePairs() {
 
 async function startMeasurement() {
   const label = document.getElementById('session-label').value.trim();
-  if (!label) { showMsg('Enter a session label', 'err'); return; }
+  if (!label) {
+    showMsg('Enter a session label', 'err');
+    setProgress('Missing session label.', 'err');
+    return;
+  }
 
   const pairs = [];
   document.querySelectorAll('#pairs-grid input:checked').forEach(el => {
@@ -968,53 +1074,73 @@ async function startMeasurement() {
       dst_name: el.dataset.dstName || el.dataset.dst,
     });
   });
-  if (!pairs.length) { showMsg('Select at least one test pair', 'err'); return; }
+  if (!pairs.length) {
+    showMsg('Select at least one test pair', 'err');
+    setProgress('No source → destination pair selected.', 'err');
+    return;
+  }
 
   const tests = [];
   document.querySelectorAll('#tests-grid input:checked').forEach(el => tests.push(el.value));
-  if (!tests.length) { showMsg('Select at least one test type', 'err'); return; }
+  if (!tests.length) {
+    showMsg('Select at least one test type', 'err');
+    setProgress('No test type selected.', 'err');
+    return;
+  }
 
   const duration   = parseInt(document.getElementById('duration').value) || 30;
   const udpBitrate = document.getElementById('udp-bitrate').value || '4M';
 
-  document.getElementById('btn-run').disabled = true;
+  clearTimeout(_pollTimer);
+  setRunButton(true, 'STARTING...');
+  setProgress('Starting measurement session...', 'running');
   showMsg('Starting measurement session...', 'info');
 
-  const r = await fetch('/api/measure/start', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({label, pairs, tests, duration, udp_bitrate: udpBitrate})
-  });
-  const d = await r.json();
-  if (d.ok) {
-    showMsg('Running...', 'info');
+  try {
+    const r = await fetch('/api/measure/start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({label, pairs, tests, duration, udp_bitrate: udpBitrate})
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) {
+      throw new Error(d.error || `HTTP ${r.status}`);
+    }
+    setRunButton(true, 'RUNNING...');
+    setProgress('Running... waiting for first status update.', 'running');
+    showMsg('Measurement is running...', 'info');
     pollStatus();
-  } else {
-    showMsg('Error: ' + d.error, 'err');
-    document.getElementById('btn-run').disabled = false;
+  } catch (e) {
+    setRunButton(false);
+    setProgress('Start failed: ' + e.message, 'err');
+    showMsg('Start failed: ' + e.message, 'err');
   }
 }
 
 async function pollStatus() {
-  const r = await fetch('/api/measure/status');
-  const d = await r.json();
-  const card = document.getElementById('progress-card');
-  const txt  = document.getElementById('progress-text');
-  const fill = document.getElementById('progress-fill');
-  card.style.display = '';
-  txt.textContent = d.progress || '';
-  txt.className = 'progress-text' + (d.running ? '' : d.error ? ' err' : ' done');
-  // Pulse bar while running
-  if (d.running) {
-    fill.style.width = '60%';
-    setTimeout(pollStatus, 2000);
-  } else {
-    fill.style.width = d.error ? '100%' : '100%';
-    fill.style.background = d.error ? 'var(--red)' : 'var(--green)';
-    document.getElementById('btn-run').disabled = false;
-    if (d.error) showMsg('Error: ' + d.error, 'err');
-    else showMsg('Measurement complete — results saved.', 'ok');
-    loadSessions();
+  try {
+    const r = await fetch('/api/measure/status');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+
+    if (d.running) {
+      setRunButton(true, 'RUNNING...');
+      setProgress(d.progress || 'Running...', 'running');
+      _pollTimer = setTimeout(pollStatus, 2000);
+    } else if (d.error) {
+      setRunButton(false);
+      setProgress('Error: ' + d.error, 'err');
+      showMsg('Error: ' + d.error, 'err');
+    } else {
+      setRunButton(false);
+      setProgress(d.progress || 'Measurement complete — results saved.', 'done');
+      showMsg('Measurement complete — results saved.', 'ok');
+      loadSessions();
+    }
+  } catch (e) {
+    setRunButton(false);
+    setProgress('Status failed: ' + e.message, 'err');
+    showMsg('Status failed: ' + e.message, 'err');
   }
 }
 
@@ -1076,6 +1202,13 @@ def render_dashboard():
 <title>MANET // PERF</title>
 <style>{CSS}</style>
 </head><body>
+
+<div id="overlay" class="info">
+  <div class="overlay-body">
+    <div id="overlay-text"></div>
+    <button id="overlay-close" onclick="hideOverlay()" aria-label="Close">&times;</button>
+  </div>
+</div>
 
 <div id="hdr">
   <div id="hdr-logo">MANET//<span>PERF</span></div>
@@ -1149,7 +1282,7 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label"></span>
-        <button class="btn btn-green" onclick="applyHalow()">APPLY TO ALL NODES</button>
+        <button class="btn btn-green" id="btn-apply-halow" onclick="applyHalow()">APPLY TO ALL NODES</button>
       </div>
     </div>
     <div class="card">
@@ -1162,7 +1295,7 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label"></span>
-        <button class="btn btn-green" onclick="apply2G()">APPLY TO ALL NODES</button>
+        <button class="btn btn-green" id="btn-apply-2g" onclick="apply2G()">APPLY TO ALL NODES</button>
       </div>
     </div>
   </div>
@@ -1184,7 +1317,7 @@ def render_dashboard():
     </div>
     <div class="card">
       <div class="card-title">Test Types</div>
-      <div class="tests-wrap">
+      <div class="tests-wrap" id="tests-grid">
         <label class="test-chip"><input type="checkbox" value="tcp_1stream"    checked> TCP 1-STREAM</label>
         <label class="test-chip"><input type="checkbox" value="tcp_4stream"          > TCP 4-STREAM</label>
         <label class="test-chip"><input type="checkbox" value="udp_throughput" checked> UDP THROUGHPUT</label>
@@ -1383,6 +1516,31 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                     if not ip:
                         continue
                     r = call_node_api(ip, '/api/control/halow_channel', 'POST', req)
+                    if not r.get('ok'):
+                        errors.append(f"{ip}: {r.get('error')}")
+                if errors:
+                    self.send_json({'ok': False, 'error': '; '.join(errors)})
+                else:
+                    self.send_json({'ok': True})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/wifi/channel':
+            try:
+                req = json.loads(body)
+                iface = req.get('interface', req.get('iface', ''))
+                channel = req.get('channel')
+                if iface not in ('wlan0', 'wlan1'):
+                    self.send_json({'ok': False, 'error': 'Invalid Wi-Fi interface'})
+                    return
+                nodes_raw = parse_registry()
+                errors = []
+                for nd in nodes_raw.values():
+                    ip = nd.get('IPV4_ADDRESS', '')
+                    if not ip:
+                        continue
+                    r = call_node_api(ip, '/api/control/wifi_channel', 'POST',
+                                      {'interface': iface, 'channel': channel})
                     if not r.get('ok'):
                         errors.append(f"{ip}: {r.get('error')}")
                 if errors:

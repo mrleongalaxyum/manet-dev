@@ -45,6 +45,7 @@ CONTROL_POST_PATHS = {
     '/api/control/interface',
     '/api/control/txpower',
     '/api/control/halow_channel',
+    '/api/control/wifi_channel',
     '/api/iperf/server/start',
     '/api/iperf/server/stop',
     '/api/iperf/client/run',
@@ -240,6 +241,21 @@ def get_halow_driver_info(iface='wlan2'):
             info['halow_source'] = 'config'
             return info
     return info
+
+def wifi_channel_to_freq(iface, channel):
+    try:
+        ch = int(channel)
+    except Exception:
+        return None
+    if iface == 'wlan0' and 1 <= ch <= 13:
+        return 2407 + ch * 5
+    if iface == 'wlan1':
+        # Common 5 GHz channels; enough for manual dashboard control.
+        if ch == 14:
+            return 2484
+        if 32 <= ch <= 177:
+            return 5000 + ch * 5
+    return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry Parser
@@ -3069,6 +3085,40 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                     pass
                 subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g@wlan2.service'], timeout=10)
                 self.send_json({'ok': True, 'channel': channel, 'bw': bw})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/control/wifi_channel':
+            try:
+                req     = json.loads(body)
+                iface   = req.get('interface', req.get('iface', ''))
+                channel = req.get('channel')
+                if iface not in ('wlan0', 'wlan1'):
+                    self.send_json({'ok': False, 'error': 'Invalid Wi-Fi interface'})
+                    return
+                freq = wifi_channel_to_freq(iface, channel)
+                if not freq:
+                    self.send_json({'ok': False, 'error': f'Invalid channel {channel} for {iface}'})
+                    return
+
+                conf_path = f'/etc/wpa_supplicant/wpa_supplicant-{iface}.conf'
+                if not os.path.exists(conf_path):
+                    self.send_json({'ok': False, 'error': f'Missing {conf_path}'})
+                    return
+                with open(conf_path) as f:
+                    content = f.read()
+                if re.search(r'frequency=\d+', content):
+                    content = re.sub(r'frequency=\d+', f'frequency={freq}', content)
+                else:
+                    content = re.sub(r'(network=\{\n)', rf'\1    frequency={freq}\n', content, count=1)
+                with open(conf_path, 'w') as f:
+                    f.write(content)
+
+                subprocess.run(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'],
+                               check=True, timeout=15)
+                self.send_json({'ok': True, 'iface': iface, 'channel': channel, 'frequency': freq})
+            except subprocess.CalledProcessError as e:
+                self.send_json({'ok': False, 'error': str(e)})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
