@@ -929,6 +929,7 @@ let _tab  = 'topology';
 let _msgTimer = null;
 let _pollTimer = null;
 let _overlayTimer = null;
+const VALID_TABS = ['topology','interfaces','radio','measure','sessions','upload'];
 
 async function fetchTopo() {
   try {
@@ -1037,9 +1038,23 @@ function renderMeasureStats(d) {
     <div class="stat-chip ${d.last_result && d.last_result.ok ? 'good' : ''}" style="grid-column:1/-1"><span>last result</span><strong>${lastResultText(d.last_result)}</strong></div>`;
 }
 
-function showTab(name) {
+function getInitialTab() {
+  const hashTab = window.location.hash ? window.location.hash.substring(1) : '';
+  if (VALID_TABS.includes(hashTab)) return hashTab;
+  try {
+    const saved = localStorage.getItem('perfDashboardTab');
+    if (VALID_TABS.includes(saved)) return saved;
+  } catch(e) {}
+  return 'topology';
+}
+
+function showTab(name, updateUrl = true) {
+  if (!VALID_TABS.includes(name)) name = 'topology';
   _tab = name;
   try { localStorage.setItem('perfDashboardTab', name); } catch(e) {}
+  if (updateUrl && window.location.hash !== '#' + name) {
+    history.replaceState(null, '', '#' + name);
+  }
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-pane').forEach(p => p.style.display = p.id === 'tab-' + name ? '' : 'none');
   if (name === 'sessions') loadSessions();
@@ -1386,15 +1401,13 @@ async function uploadVentum() {
 }
 
 window.onload = async () => {
-  const savedTab = (() => {
-    try { return localStorage.getItem('perfDashboardTab') || 'topology'; }
-    catch(e) { return 'topology'; }
-  })();
-  showTab(savedTab);
+  showTab(getInitialTab());
   await fetchTopo();
   buildIfaceControl();
   buildHalowConfig();
 };
+
+window.addEventListener('hashchange', () => showTab(getInitialTab(), false));
 """
 
 def render_dashboard():
@@ -1622,6 +1635,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(body)
 
