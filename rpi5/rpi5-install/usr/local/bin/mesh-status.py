@@ -3096,7 +3096,7 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 content = re.sub(r'(s1g_prim_chwidth\s*=\s*)\d+', rf'\g<1>{chwidth}', content)
                 with open(wpa_conf, 'w') as f:
                     f.write(content)
-                # Apply immediately via morse_cli (no wpa_supplicant restart needed)
+                # Apply immediately via morse_cli (needs root; mesh-status runs as root)
                 morse_result = subprocess.run(
                     ['morse_cli', '-i', 'wlan2', 'channel',
                      '-c', str(freq_khz), '-o', str(bw_mhz), '-p', str(bw_mhz)],
