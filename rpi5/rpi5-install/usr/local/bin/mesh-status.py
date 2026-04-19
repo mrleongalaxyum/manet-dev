@@ -3159,7 +3159,10 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                     result = json.loads(r.stdout)
                 except Exception:
                     result = {'raw': r.stdout, 'stderr': r.stderr}
-                self.send_json({'ok': True, 'result': result})
+                if result.get('error'):
+                    self.send_json({'ok': False, 'error': result.get('error'), 'result': result})
+                else:
+                    self.send_json({'ok': r.returncode == 0, 'error': r.stderr.strip(), 'result': result})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 

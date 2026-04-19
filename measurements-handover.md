@@ -14,6 +14,8 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - `perf-dashboard.py` CSS ima mobile breakpoint za uske ekrane: header/nav se lome, kartice i forme idu u jednu kolonu, global action buttons u 2 kolone, a tablice dobivaju horizontalni scroll samo unutar tablice.
 - Measurement i radio config akcije daju foreground overlay feedback: start/running/failed/completed za mjerenja te applying/failed/applied za HaLow i Wi-Fi channel promjene.
 - Measurement progress prikazuje lagane status brojke bez dodatnog radio opterećenja: completed/total, elapsed, current pair/test, current elapsed i zadnji završeni rezultat. Saved sessions prikazuje simple avg/min/max sažetak za TCP/UDP Mbps, RTT, jitter i loss kad su metrike dostupne.
+- Saved sessions imaju `DELETE` akciju s browser confirmation dialogom prije brisanja cijele sesije.
+- Dugi iperf/ping control pozivi moraju imati timeout dulji od trajanja testa. Kratki HTTP timeout uzrokuje lažne `timed out` failove i može ostaviti iperf server zauzet za sljedeći test.
 - Hop matrix tablica i hop-count računanje su uklonjeni iz perf dashboarda; hop/multihop vizualizacija ostaje u glavnom `mesh-status.py` topology prikazu.
 - HaLow runtime info se prvo pokušava čitati kroz Morse driver tooling (`morse_cli` channel info, JSON ili parsable text), jer `iw` može prijaviti krivi standardni Wi-Fi kanal. `wpa_supplicant_s1g` config ostaje samo fallback/debug.
 
@@ -241,6 +243,7 @@ POST /api/measure/start         # Pokretanje iperf3 sesije
 GET  /api/measure/status        # Status tekućeg mjerenja
 GET  /api/sessions              # Lista prošlih sesija
 GET  /api/sessions/<id>         # Dohvati rezultate sesije
+DELETE /api/sessions/<id>       # Obriši saved session uz UI confirmation
 POST /api/upload/github         # Git push rezultata
 POST /api/upload/ventum         # curl -u upload tar.gz bundlea na Ventum
 ```
@@ -294,5 +297,5 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
 ## Ventum / GitHub pristup
 
 - GitHub: `mrleongalaxyum/manet-dev` (public) — measurements u `measurements/` folderu
-- Ventum measurements upload: `curl -u <user>:<password> -T <file> https://manet.ventum.hr/upload/rpi5/<file>`
+- Ventum measurements upload: `curl -u <user>:<password> -T <file> https://manet.ventum.hr/upload/rpi5/measurements/<file>`
 - Runtime config overridei u `/etc/mesh.conf`: `ventum_upload_url`, `ventum_auth` ili `ventum_user` + `ventum_password`
