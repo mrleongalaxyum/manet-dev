@@ -7,7 +7,7 @@ Serves mesh network status and topology information on port 8080.
 Access:
   /          - Public status page (localhost + mesh subnet)
   /api/data  - JSON data endpoint (same access control)
-  /admin     - Admin config page (HTTP Basic Auth with admin_password)
+  /admin     - Admin config page (no Basic auth)
 
 Reads:
   /etc/mesh.conf                - Node configuration
@@ -27,7 +27,6 @@ import subprocess
 import re
 import os
 import ipaddress
-import base64
 import socket
 import threading
 import time
@@ -41,6 +40,16 @@ MESH_CONF_FILE  = "/etc/mesh.conf"
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
+HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500, 868500]
+CONTROL_POST_PATHS = {
+    '/api/control/interface',
+    '/api/control/txpower',
+    '/api/control/halow_channel',
+    '/api/iperf/server/start',
+    '/api/iperf/server/stop',
+    '/api/iperf/client/run',
+    '/api/ping/run',
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config / State Loaders
@@ -60,6 +69,177 @@ def load_kv_file(path):
     except Exception:
         pass
     return conf
+
+def _first_flat_value(data, keys):
+    """Find the first matching key in a nested dict/list structure."""
+    if isinstance(data, dict):
+        for key in keys:
+            if key in data and data[key] not in (None, ''):
+                return data[key]
+        for value in data.values():
+            found = _first_flat_value(value, keys)
+            if found not in (None, ''):
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = _first_flat_value(item, keys)
+            if found not in (None, ''):
+                return found
+    return None
+
+def _json_from_text(text):
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text):
+        if char not in '[{':
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[idx:])
+            return data
+        except Exception:
+            pass
+    return None
+
+def _format_halow_bw(value):
+    if value in (None, ''):
+        return ''
+    text = str(value).strip()
+    low = text.lower()
+    if low.endswith('mhz'):
+        return text.replace('mhz', 'MHz').replace('MHZ', 'MHz')
+    try:
+        num = float(text)
+        if num >= 1000000:
+            num /= 1000000
+        elif num >= 1000:
+            num /= 1000
+        if num in (1, 2, 4):
+            return f'{int(num)}MHz'
+    except Exception:
+        pass
+    return text
+
+def _channel_from_frequency(freq_value):
+    try:
+        m = re.search(r'[0-9.]+', str(freq_value))
+        freq = float(m.group(0)) if m else None
+    except Exception:
+        return '', ''
+    if freq is None:
+        return '', ''
+    if freq > 1000000:
+        freq_khz = freq / 1000.0
+        freq_mhz = freq / 1000000.0
+    elif freq > 1000:
+        freq_khz = freq
+        freq_mhz = freq / 1000.0
+    else:
+        freq_khz = freq * 1000.0
+        freq_mhz = freq
+    channel = ''
+    for idx, center_khz in enumerate(HALOW_EU_CHANNELS, start=1):
+        if abs(freq_khz - center_khz) <= 500:
+            channel = str(idx)
+            break
+    return channel, f'{freq_mhz:.3f}'.rstrip('0').rstrip('.')
+
+def _parse_morse_channel_output(text):
+    info = {}
+    data = _json_from_text(text)
+    if data is not None:
+        freq = _first_flat_value(data, [
+            'channel_frequency', 'frequency', 'freq', 'freq_khz', 'freq_hz',
+            'operating_frequency', 'op_chan_freq'
+        ])
+        bw = _first_flat_value(data, [
+            'channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw',
+            'bandwidth', 'bw', 'op_chan_bw'
+        ])
+        idx = _first_flat_value(data, [
+            'channel_index', 'channel', 'primary_channel', 's1g_channel'
+        ])
+    else:
+        freq = None
+        bw = None
+        idx = None
+        for key in ('channel_frequency', 'frequency', 'freq_khz', 'freq_hz', 'op_chan_freq'):
+            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+)"?', text, re.I)
+            if m:
+                freq = m.group(1)
+                break
+        for key in ('channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw', 'bandwidth', 'op_chan_bw'):
+            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+\s*(?:[kKmM][hH][zZ])?)"?', text, re.I)
+            if m:
+                bw = m.group(1)
+                break
+        m = re.search(r'channel(?:_index)?\s*[:=]\s*"?(\d+)"?', text, re.I)
+        if m:
+            idx = m.group(1)
+
+    if freq not in (None, ''):
+        channel, freq_mhz = _channel_from_frequency(freq)
+        if channel:
+            info['channel'] = channel
+        if freq_mhz:
+            info['freq_mhz'] = freq_mhz
+    if bw not in (None, ''):
+        info['halow_bw'] = _format_halow_bw(bw)
+    if idx not in (None, '') and 'channel' not in info:
+        info['channel'] = str(idx)
+    if info:
+        info['halow_source'] = 'morse'
+    return info
+
+def get_halow_driver_info(iface='wlan2'):
+    """Read HaLow runtime channel data from Morse tooling; config is only fallback."""
+    binaries = ['/usr/local/bin/morse_cli', 'morse_cli']
+    variants = [
+        lambda b: [b, '-i', iface, 'channel', '-j'],
+        lambda b: [b, '-i', iface, 'channel', '--json'],
+        lambda b: [b, 'channel', '-i', iface, '-j'],
+        lambda b: [b, '-i', iface, 'channel'],
+        lambda b: [b, 'channel', '-i', iface],
+    ]
+    seen = set()
+    for binary in binaries:
+        if binary.startswith('/') and not os.path.exists(binary):
+            continue
+        for build in variants:
+            cmd = build(binary)
+            key = tuple(cmd)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            except Exception:
+                continue
+            text = (r.stdout or '') + '\n' + (r.stderr or '')
+            if r.returncode != 0 and not text.strip():
+                continue
+            parsed = _parse_morse_channel_output(text)
+            if parsed:
+                return parsed
+
+    info = {}
+    for conf_path in (
+        '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf',
+        '/etc/wpa_supplicant/wpa_supplicant_s1g-wlan2.conf',
+    ):
+        try:
+            with open(conf_path) as f:
+                txt = f.read()
+        except Exception:
+            continue
+        m = re.search(r'channel\s*=\s*(\d+)', txt)
+        if m:
+            info['channel'] = m.group(1)
+        m = re.search(r's1g_prim_chwidth\s*=\s*(\d+)', txt)
+        if m:
+            info['halow_bw'] = {'0': '1MHz', '1': '2MHz', '2': '4MHz'}.get(m.group(1), m.group(1))
+        if info:
+            info['halow_source'] = 'config'
+            return info
+    return info
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry Parser
@@ -268,6 +448,9 @@ def get_interfaces():
     except Exception:
         pass
 
+    # HaLow (wlan2/morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
+    iw_info.setdefault('wlan2', {}).update(get_halow_driver_info('wlan2'))
+
     # ── bat0 slaves (active interfaces per batctl) ──
     bat0_slaves_active   = set()   # confirmed active in batctl
     bat0_slaves_inactive = set()   # listed but NOT active
@@ -426,13 +609,17 @@ def get_interfaces():
                 faults.append(f'Not in bat0 and not an AP — check wpa_supplicant')
 
         ifaces.append({
-            'name':   name,
-            'role':   role,
-            'health': health,
-            'detail': detail,
-            'faults': faults,
-            'addrs':  addrs,
-            'state':  state,
+            'name':     name,
+            'role':     role,
+            'health':   health,
+            'detail':   detail,
+            'faults':   faults,
+            'addrs':    addrs,
+            'state':    state,
+            'channel':  iw.get('channel', ''),
+            'freq_mhz': iw.get('freq_mhz', ''),
+            'halow_bw': iw.get('halow_bw', ''),
+            'halow_source': iw.get('halow_source', ''),
         })
 
     # Sort: bat0, mesh, ap, gateway, eud-bridge, bridge, other
@@ -570,20 +757,6 @@ def is_allowed_ip(client_ip, conf):
             return True
     except Exception:
         pass
-    return False
-
-def check_admin_auth(handler, conf):
-    admin_pw = conf.get('admin_password', '')
-    if not admin_pw:
-        return False
-    auth = handler.headers.get('Authorization', '')
-    if auth.startswith('Basic '):
-        try:
-            decoded = base64.b64decode(auth[6:]).decode('utf-8')
-            _, password = decoded.split(':', 1)
-            return password == admin_pw
-        except Exception:
-            pass
     return False
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2572,13 +2745,6 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'Forbidden')
 
-    def send_401(self, realm='MANET Admin'):
-        self.send_response(401)
-        self.send_header('WWW-Authenticate', f'Basic realm="{realm}"')
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'Unauthorized')
-
     def send_html(self, body):
         encoded = body.encode('utf-8')
         self.send_response(200)
@@ -2636,11 +2802,8 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         parsed     = urlparse(self.path)
         path       = parsed.path.rstrip('/') or '/'
 
-        # Admin page — auth required, no IP restriction
+        # Admin page — no Basic auth
         if path == '/admin':
-            if not check_admin_auth(self, conf):
-                self.send_401()
-                return
             self.send_html(render_admin_page())
             return
 
@@ -2719,9 +2882,6 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(str(e).encode())
         elif path == '/api/admin/status':
-            if not check_admin_auth(self, conf):
-                self.send_401()
-                return
             try:
                 data = assemble_admin_status()
                 data['my_hostname'] = get_my_hostname()
@@ -2742,15 +2902,19 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             return
 
         conf      = load_kv_file(MESH_CONF_FILE)
+        client_ip = self.client_address[0]
         parsed    = urlparse(self.path)
         path      = parsed.path.rstrip('/') or '/'
         length    = int(self.headers.get('Content-Length', 0))
         body      = self.rfile.read(length) if length else b'{}'
 
-        # All POST endpoints require admin auth
-        if not check_admin_auth(self, conf):
-            self.send_401()
-            return
+        # Runtime control endpoints are called server-to-server by perf-dashboard,
+        # so restrict them to localhost/mesh IPs. Admin POSTs are intentionally
+        # not protected by Basic auth for the local field UI.
+        if path in CONTROL_POST_PATHS:
+            if not is_allowed_ip(client_ip, conf):
+                self.send_403()
+                return
 
         if path == '/api/admin/stage':
             try:
@@ -2997,7 +3161,7 @@ if __name__ == '__main__':
     server = ThreadedServer(('0.0.0.0', port), MeshHandler)
     print(f'MANET Status Server listening on port {port}')
     print(f'  Status:  http://localhost:{port}/')
-    print(f'  Admin:   http://localhost:{port}/admin  (requires admin_password)')
+    print(f'  Admin:   http://localhost:{port}/admin  (no auth)')
     try:
         server.serve_forever()
     except KeyboardInterrupt:
