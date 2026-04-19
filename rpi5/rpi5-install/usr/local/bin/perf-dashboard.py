@@ -32,6 +32,7 @@ import threading
 import csv
 import io
 import shutil
+import hashlib
 import urllib.request
 import ipaddress
 from datetime import datetime, timezone
@@ -43,6 +44,8 @@ MESH_STATE_FILE = '/etc/mesh_ipv4_state'
 REGISTRY_FILE   = '/var/run/mesh_node_registry'
 SESSIONS_DIR    = '/var/log/manet-measurements'
 CONTROL_PORT    = 80  # mesh-status.py port on each node
+ALFRED_RADIO_TYPE = 71
+ALFRED_RADIO_ACK_TYPE = 72
 
 # EU S1G channels (centre frequencies in MHz)
 HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500, 868500]
@@ -113,7 +116,12 @@ def parse_registry():
 def get_bat0_active_ifaces():
     try:
         r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
-        return [l.split(':')[0].strip() for l in r.stdout.splitlines() if 'active' in l]
+        return [
+            m.group(1)
+            for l in r.stdout.splitlines()
+            for m in [re.match(r'^\s*([^:\s]+):\s+active\b', l)]
+            if m
+        ]
     except Exception:
         return []
 
@@ -306,6 +314,206 @@ def call_node_api(node_ip, path, method='GET', data=None, timeout=8):
             return json.loads(resp.read().decode())
     except Exception as e:
         return {'ok': False, 'error': str(e)}
+
+def _add_alfred_candidate(items, value, kind):
+    if isinstance(value, bytes):
+        value = value.decode(errors='ignore')
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return
+        try:
+            value = json.loads(value)
+        except Exception:
+            return
+    if isinstance(value, dict) and value.get('kind') == kind:
+        items.append(value)
+
+def _extract_alfred_objects(raw, kind):
+    items = []
+    _add_alfred_candidate(items, raw, kind)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            for value in data.values():
+                _add_alfred_candidate(items, value, kind)
+        elif isinstance(data, list):
+            for value in data:
+                _add_alfred_candidate(items, value, kind)
+    except Exception:
+        pass
+    for line in raw.splitlines():
+        _add_alfred_candidate(items, line, kind)
+    for match in re.finditer(r'"((?:\\.|[^"\\])*)"\s*(?:[,}])', raw):
+        try:
+            text = bytes(match.group(1), 'utf-8').decode('unicode_escape')
+        except Exception:
+            continue
+        _add_alfred_candidate(items, text, kind)
+    return items
+
+def read_alfred_objects(type_id, kind):
+    try:
+        r = subprocess.run(['alfred', '-r', str(type_id)],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return []
+        return _extract_alfred_objects(r.stdout, kind)
+    except Exception:
+        return []
+
+def send_alfred_object(type_id, obj):
+    payload = json.dumps(obj, separators=(',', ':'))
+    try:
+        r = subprocess.run(['alfred', '-s', str(type_id)],
+                           input=payload, capture_output=True, text=True, timeout=5)
+        return r.returncode == 0, (r.stderr or r.stdout or '').strip()
+    except Exception as e:
+        return False, str(e)
+
+def radio_expected_hosts():
+    try:
+        subprocess.run(['/usr/local/bin/mesh-registry-builder.sh'],
+                       capture_output=True, text=True, timeout=8)
+    except Exception:
+        pass
+    nodes = parse_registry()
+    now = int(time.time())
+    hosts = []
+    for nd in nodes.values():
+        host = nd.get('HOSTNAME', '')
+        if not host:
+            continue
+        if nd.get('NODE_STATE', 'ACTIVE') == 'SHUTTING_DOWN':
+            continue
+        try:
+            last_seen = int(nd.get('LAST_SEEN_TIMESTAMP', '0') or 0)
+        except Exception:
+            last_seen = 0
+        if last_seen and now - last_seen > 600:
+            continue
+        hosts.append(host)
+    my_host = get_my_hostname()
+    if my_host and my_host not in hosts:
+        hosts.append(my_host)
+    return sorted(set(hosts))
+
+def radio_target_for_node(node_ip):
+    if node_ip == 'all':
+        return 'all'
+    for nd in parse_registry().values():
+        if nd.get('IPV4_ADDRESS', '') == node_ip:
+            host = nd.get('HOSTNAME', '')
+            if host:
+                return [host]
+    raise ValueError(f'Unknown node IP {node_ip}')
+
+def make_radio_version(pkg):
+    basis = json.dumps(pkg, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(basis.encode()).hexdigest()[:10]
+
+def radio_ack_snapshot(version):
+    latest = {}
+    for ack in read_alfred_objects(ALFRED_RADIO_ACK_TYPE, 'radio_ack'):
+        if ack.get('version') != version:
+            continue
+        host = ack.get('hostname', '')
+        if host:
+            latest[host] = ack
+    return latest
+
+def wait_radio_acks(version, expected_hosts, timeout=75):
+    deadline = time.time() + timeout
+    expected = set(expected_hosts)
+    last = {}
+    while time.time() < deadline:
+        last = radio_ack_snapshot(version)
+        ok_hosts = {h for h, a in last.items() if a.get('ok') is True}
+        bad = {h: a for h, a in last.items() if a.get('ok') is False}
+        missing = sorted(expected - ok_hosts - set(bad.keys()))
+        if bad or not missing:
+            return {'ok': not bad and not missing, 'acks': last,
+                    'missing': missing, 'bad': bad}
+        time.sleep(2)
+    ok_hosts = {h for h, a in last.items() if a.get('ok') is True}
+    bad = {h: a for h, a in last.items() if a.get('ok') is False}
+    missing = sorted(expected - ok_hosts - set(bad.keys()))
+    return {'ok': False, 'acks': last, 'missing': missing, 'bad': bad}
+
+def cancel_radio_version(version):
+    cancel = {
+        'kind': 'radio_cancel',
+        'version': version,
+        'issued_by': get_my_hostname(),
+        'issued_at': int(time.time()),
+    }
+    send_alfred_object(ALFRED_RADIO_TYPE, cancel)
+
+def coordinate_radio_toggle(node_ip, iface, state):
+    if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
+        return {'ok': False, 'error': 'Invalid iface or state'}
+
+    targets = radio_target_for_node(node_ip)
+    expected = radio_expected_hosts()
+    if not expected:
+        return {'ok': False, 'error': 'No reachable nodes in registry'}
+    if node_ip == 'all' and len(expected) < 2:
+        return {
+            'ok': False,
+            'error': 'Refusing global radio change: registry sees fewer than 2 reachable nodes. Wait for Alfred registry refresh and retry.',
+            'expected': expected,
+        }
+
+    pkg = {
+        'kind': 'radio_state',
+        'issued_by': get_my_hostname(),
+        'issued_at': int(time.time()),
+        'activate_at': 0,
+        'targets': targets,
+        'desired': {iface: state},
+    }
+    pkg['version'] = make_radio_version(pkg)
+
+    ok, error = send_alfred_object(ALFRED_RADIO_TYPE, pkg)
+    if not ok:
+        return {'ok': False, 'error': f'Alfred stage failed: {error}'}
+
+    ack_state = wait_radio_acks(pkg['version'], expected, timeout=75)
+    if not ack_state['ok']:
+        cancel_radio_version(pkg['version'])
+        bad = [
+            f"{host}: {ack.get('error') or 'rejected'}"
+            for host, ack in sorted(ack_state['bad'].items())
+        ]
+        parts = []
+        if ack_state['missing']:
+            parts.append('missing ACK: ' + ', '.join(ack_state['missing']))
+        if bad:
+            parts.append('rejected: ' + '; '.join(bad))
+        return {
+            'ok': False,
+            'error': '; '.join(parts) or 'ACK timeout',
+            'version': pkg['version'],
+            'missing': ack_state['missing'],
+            'bad': bad,
+        }
+
+    activate_at = int(time.time()) + 20
+    pkg['activate_at'] = activate_at
+    pkg['issued_at'] = int(time.time())
+    ok, error = send_alfred_object(ALFRED_RADIO_TYPE, pkg)
+    if not ok:
+        cancel_radio_version(pkg['version'])
+        return {'ok': False, 'error': f'Alfred activate failed: {error}'}
+
+    return {
+        'ok': True,
+        'version': pkg['version'],
+        'activate_at': activate_at,
+        'acked': sorted(ack_state['acks'].keys()),
+        'expected': expected,
+        'targets': targets,
+    }
 
 def get_iw_info(iface):
     """Get current channel/freq/txpower for an interface."""
@@ -605,11 +813,11 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                         },
                     })
 
-                ts    = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+                ts    = datetime.now().strftime('%Y%m%dT%H%M%S')
                 fname = f'{ts}_{src_name}_{dst_name}_{test_type}.json'
                 result_record = {
                     'session_label':    label,
-                    'timestamp':        datetime.now(timezone.utc).isoformat(),
+                    'timestamp':        datetime.now().isoformat(),
                     'test_type':        test_type,
                     'source_node':      src_name,
                     'destination_node': dst_name,
@@ -982,6 +1190,72 @@ function setButtonBusy(id, busy, label, idleLabel) {
   btn.textContent = busy ? label : idleLabel;
 }
 
+function radioTargetNodes(nodeIp) {
+  if (!_topo || !_topo.nodes) return [];
+  if (nodeIp === 'all') return _topo.nodes;
+  return _topo.nodes.filter(n => n.ip === nodeIp);
+}
+
+function radioStateOk(nodes, iface, state) {
+  const expectedActive = state === 'up';
+  const bad = [];
+  for (const node of nodes) {
+    const info = node.interfaces && node.interfaces[iface];
+    const active = !!(info && info.active === true);
+    if (active !== expectedActive) bad.push(node.hostname || node.ip || 'unknown');
+  }
+  return {ok: bad.length === 0, bad};
+}
+
+function confirmRadioDown(nodeIp, iface) {
+  if (nodeIp !== 'all') {
+    const node = radioTargetNodes(nodeIp)[0];
+    const label = node ? `${node.hostname} (${node.ip})` : nodeIp;
+    return confirm(
+      `Disable ${iface} on ${label}?\\n\\n` +
+      `This will stop the wpa_supplicant service for that radio.`
+    );
+  }
+  const nodes = radioTargetNodes('all');
+  const nodeList = nodes.map(n => n.hostname || n.ip).join(', ') || 'all nodes';
+  return confirm(
+    `Disable ${iface} on ALL nodes?\\n\\n` +
+    `Targets: ${nodeList}\\n\\n` +
+    `The change will be staged through Alfred, all nodes must ACK, then the wpa_supplicant service for ${iface} will be stopped.`
+  );
+}
+
+async function verifyRadioExecution(nodeIp, iface, state, activateAt) {
+  const delayMs = Math.max(0, ((activateAt || 0) - Math.floor(Date.now() / 1000) + 3) * 1000);
+  await new Promise(resolve => setTimeout(resolve, delayMs));
+
+  showOverlay(`Verifying ${iface} ${state} after coordinated apply...`, 'info');
+  showMsg(`Verifying ${iface} ${state} after coordinated apply...`, 'info');
+
+  let lastBad = [];
+  for (let attempt = 0; attempt < 15; attempt++) {
+    await fetchTopo();
+    const nodes = radioTargetNodes(nodeIp);
+    const result = radioStateOk(nodes, iface, state);
+    if (nodes.length && result.ok) {
+      buildIfaceControl();
+      const scope = nodeIp === 'all' ? 'all nodes' : (nodes[0].hostname || nodeIp);
+      showOverlay(`${iface} ${state} executed on ${scope}`, 'ok');
+      showMsg(`${iface} ${state} executed on ${scope}`, 'ok');
+      return true;
+    }
+    lastBad = result.bad;
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+
+  buildIfaceControl();
+  const msg = `${iface} ${state} was scheduled, but execution is not confirmed` +
+              (lastBad.length ? ` on: ${lastBad.join(', ')}` : '');
+  showOverlay(msg, 'err');
+  showMsg(msg, 'err');
+  return false;
+}
+
 function setProgress(text, state) {
   const card = document.getElementById('progress-card');
   const txt  = document.getElementById('progress-text');
@@ -1063,7 +1337,7 @@ function showTab(name, updateUrl = true) {
 // ── Clock ──
 function tickClock() {
   const el = document.getElementById('hdr-clock');
-  if (el) el.textContent = new Date().toISOString().replace('T',' ').substring(0,19) + ' UTC';
+  if (el) el.textContent = new Date().toLocaleString('hr-HR', {hour12:false}).replace(',','');
 }
 setInterval(tickClock, 1000); tickClock();
 
@@ -1076,7 +1350,7 @@ function renderTopology() {
     const ifaces = node.interfaces || {};
     const chips = ['wlan0','wlan1','wlan2'].map(i => {
       const info = ifaces[i] || {};
-      const on = info.active !== false;
+      const on = info.active === true;
       const band = i === 'wlan0' ? '2.4G' : i === 'wlan1' ? '5G' : 'HaLow';
       const ch = info.channel ? ` ch${info.channel}` : (info.freq_mhz ? ` ${Math.round(info.freq_mhz)}MHz` : '');
       return `<span class="iface-chip ${on ? 'iface-on' : 'iface-off'}">${band}${on ? ch : ' OFF'}</span>`;
@@ -1116,7 +1390,7 @@ function buildIfaceControl() {
     let html = `<div class="card-title">${node.hostname} &nbsp;<span style="color:var(--muted);font-size:10px">${node.ip}${node.is_me ? ' &bull; THIS NODE' : ''}</span></div>`;
     for (const iface of ['wlan0','wlan1','wlan2']) {
       const info = ifaces[iface] || {};
-      const on = info.active !== false;
+      const on = info.active === true;
       html += `<div class="iface-block">
         <div class="iface-header">
           <span class="iface-name">${iface}</span>
@@ -1143,14 +1417,29 @@ function buildIfaceControl() {
 }
 
 async function toggleIface(nodeIp, nodeId, iface, state) {
-  const r = await fetch('/api/interface/toggle', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({node_ip: nodeIp, iface, state})
-  });
-  const d = await r.json();
-  if (d.ok) { showMsg(`${iface} ${state} on ${nodeIp}`, 'ok'); await fetchTopo(); buildIfaceControl(); }
-  else showMsg('Error: ' + d.error, 'err');
+  if (state === 'down' && !confirmRadioDown(nodeIp, iface)) return;
+  showOverlay(`Coordinating ${iface} ${state} on ${nodeIp} through Alfred...`, 'info');
+  showMsg(`Staging ${iface} ${state}; waiting for mesh ACKs...`, 'info');
+  try {
+    const r = await fetch('/api/interface/toggle', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({node_ip: nodeIp, iface, state})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      const wait = d.activate_at ? Math.max(0, d.activate_at - Math.floor(Date.now() / 1000)) : 0;
+      showOverlay(`${iface} ${state} ACKed by ${d.acked?.length || 0}/${d.expected?.length || 0} nodes. Applying in ${wait}s...`, 'ok');
+      showMsg(`${iface} ${state} scheduled through Alfred`, 'ok');
+      verifyRadioExecution(nodeIp, iface, state, d.activate_at);
+    } else {
+      showOverlay(`Radio change failed: ${d.error}`, 'err');
+      showMsg('Error: ' + d.error, 'err');
+    }
+  } catch(e) {
+    showOverlay(`Radio change failed: ${e.message}`, 'err');
+    showMsg('Error: ' + e.message, 'err');
+  }
 }
 
 async function setTxPower(nodeIp, nodeId, iface) {
@@ -1166,14 +1455,29 @@ async function setTxPower(nodeIp, nodeId, iface) {
 }
 
 async function toggleAll(iface, state) {
-  const r = await fetch('/api/interface/toggle', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({node_ip: 'all', iface, state})
-  });
-  const d = await r.json();
-  if (d.ok) { showMsg(`${iface} ${state} on all nodes`, 'ok'); await fetchTopo(); buildIfaceControl(); }
-  else showMsg('Error: ' + d.error, 'err');
+  if (state === 'down' && !confirmRadioDown('all', iface)) return;
+  showOverlay(`Coordinating ${iface} ${state} on all nodes through Alfred...`, 'info');
+  showMsg(`Staging ${iface} ${state}; waiting for all mesh ACKs...`, 'info');
+  try {
+    const r = await fetch('/api/interface/toggle', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({node_ip: 'all', iface, state})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      const wait = d.activate_at ? Math.max(0, d.activate_at - Math.floor(Date.now() / 1000)) : 0;
+      showOverlay(`${iface} ${state} ACKed by ${d.acked?.length || 0}/${d.expected?.length || 0} nodes. Applying in ${wait}s...`, 'ok');
+      showMsg(`${iface} ${state} scheduled on all nodes through Alfred`, 'ok');
+      verifyRadioExecution('all', iface, state, d.activate_at);
+    } else {
+      showOverlay(`Radio change failed: ${d.error}`, 'err');
+      showMsg('Error: ' + d.error, 'err');
+    }
+  } catch(e) {
+    showOverlay(`Radio change failed: ${e.message}`, 'err');
+    showMsg('Error: ' + e.message, 'err');
+  }
 }
 
 // ── HaLow config tab (HTML is static in template) ──
@@ -1769,26 +2073,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                 node_ip  = req.get('node_ip', '')
                 iface    = req.get('iface', '')
                 state    = req.get('state', '')
-
-                if node_ip == 'all':
-                    nodes_raw = parse_registry()
-                    errors = []
-                    for nd in nodes_raw.values():
-                        ip = nd.get('IPV4_ADDRESS', '')
-                        if not ip:
-                            continue
-                        r = call_node_api(ip, '/api/control/interface', 'POST',
-                                          {'iface': iface, 'state': state})
-                        if not r.get('ok'):
-                            errors.append(f"{ip}: {r.get('error')}")
-                    if errors:
-                        self.send_json({'ok': False, 'error': '; '.join(errors)})
-                    else:
-                        self.send_json({'ok': True})
-                else:
-                    r = call_node_api(node_ip, '/api/control/interface', 'POST',
-                                      {'iface': iface, 'state': state})
-                    self.send_json(r)
+                self.send_json(coordinate_radio_toggle(node_ip, iface, state))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -1960,7 +2245,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                                check=True, timeout=30)
                 subprocess.run(['git', '-C', repo_dir, 'add', 'measurements/'],
                                check=True, timeout=10)
-                ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M')
                 subprocess.run(['git', '-C', repo_dir, 'commit', '-m',
                                 f'measurements: add results {ts}'],
                                check=True, timeout=10)
@@ -1982,7 +2267,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                     password = conf.get('ventum_password', 'really-strong-password-321')
                     ventum_auth = f'{user}:{password}'
 
-                ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+                ts = datetime.now().strftime('%Y%m%dT%H%M%S')
                 host = get_my_hostname()
                 archive = f'/tmp/manet-measurements-{host}-{ts}.tar.gz'
                 remote_name = os.path.basename(archive)

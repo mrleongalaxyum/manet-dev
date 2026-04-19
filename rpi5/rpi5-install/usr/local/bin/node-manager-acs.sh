@@ -37,6 +37,7 @@ ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
+RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
@@ -139,6 +140,19 @@ get_current_freq() {
     grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
 }
 
+radio_iface_enabled() {
+    python3 - "$1" <<'PY'
+import json, sys
+iface = sys.argv[1]
+try:
+    with open('/var/lib/mesh_radio_state.json') as f:
+        state = json.load(f).get('desired', {}).get(iface, 'up')
+except Exception:
+    state = 'up'
+sys.exit(1 if state == 'down' else 0)
+PY
+}
+
 load_mesh_roles() {
     local mesh_ifaces=()
 
@@ -155,8 +169,8 @@ load_mesh_roles() {
 }
 
 restart_mesh_supplicants() {
-    [ -n "$WPA_IFACE_2_4" ] && systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
-    [ -n "$WPA_IFACE_5_0" ] && systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
+    [ -n "$WPA_IFACE_2_4" ] && radio_iface_enabled "$WPA_IFACE_2_4" && systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
+    [ -n "$WPA_IFACE_5_0" ] && radio_iface_enabled "$WPA_IFACE_5_0" && systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
 }
 
 is_in_lobby() {
@@ -276,6 +290,11 @@ log "Mesh roles: 2.4G=${WPA_IFACE_2_4:-unset}, 5G=${WPA_IFACE_5_0:-unset}"
 # === MAIN LOOP ===
 while true; do
     NOW=$(date +%s)
+
+    # === ALFRED RADIO STATE SYNC ===
+    # Global radio up/down changes are staged through Alfred and only applied
+    # after all nodes have ACKed the same version.
+    [ -x "$RADIO_STATE_SYNC" ] && "$RADIO_STATE_SYNC" sync || true
 
     # Load current chunk assignment from IP manager
     MY_CHUNK=0

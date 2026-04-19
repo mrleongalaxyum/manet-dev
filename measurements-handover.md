@@ -25,6 +25,9 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - Provjeriti točnu `morse_cli` runtime sintaksu na fizičkom nodu. Implementacija trenutno pokušava više varijanti, uključujući `morse_cli -i wlan2 channel -j`, `--json` i text output.
 - Ako produkcijski Morse alat koristi drugačiji morsectrl transport call, zamijeniti listu pokušaja u `get_halow_driver_info()`.
 - Nakon deploya potvrditi da `/api/topology` i `/api/data` vraćaju `halow_source: "morse"` za `wlan2`; `halow_source: "config"` znači da driver alat nije vratio parsable runtime podatke.
+- Zamijeniti trenutni direktni interface toggle fan-out s Alfred koordiniranim radio-state workflowom: željeno stanje se prvo propagira kroz mesh, svaki nod ACK-a staging, a tek nakon svih ACK-ova ide koordinirani apply.
+- Gašenje/paljenje wlan interfacea mora se raditi kroz odgovarajući `wpa_supplicant` systemd service. Sam `ip link down` nije dovoljan jer service/watchdog može vratiti interface.
+- Implementirano: `perf-dashboard.py` za `/api/interface/toggle` sada objavljuje radio-state kroz Alfred type `71`, čeka ACK-ove kroz Alfred type `72`, pa objavljuje isti version s `activate_at`. Čvorovi obrađuju pakete kroz `mesh-radio-state.py sync`, koji se poziva iz node-manager petlje.
 
 ---
 
@@ -33,10 +36,10 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 ### Nodovi
 | Hostname    | LAN IP        | Mesh IP (br0) |
 |-------------|---------------|----------------|
-| mesh-78f3   | 192.168.1.198 | 10.30.2.226    |
-| mesh-78f7   | 192.168.1.53  | 10.30.2.6      |
-| mesh-f86f   | 192.168.1.51  | 10.30.2.182    |
-| mesh-7946   | 192.168.1.50  | 10.30.2.160    |
+| mesh-78f3   | 192.168.1.198 | 10.30.2.182    |
+| mesh-78f7   | 192.168.1.53  | 10.30.2.28     |
+| mesh-f86f   | 192.168.1.51  | 10.30.2.72     |
+| mesh-7946   | 192.168.1.50  | 10.30.2.138    |
 
 SSH: `radio@<ip>`, password: `raspberry`
 
@@ -96,6 +99,28 @@ br0 (bridge)    ← bat0 + end0 + wlan3 (ako EUD wireless mode)
 - Toggle 5 GHz (wlan1) ON/OFF na svim nodovima
 - Toggle HaLow (wlan2) ON/OFF na svim nodovima
 
+**Kritični zahtjev za propagaciju:**
+- Globalni up/down radio state ne smije se raditi kao direktni HTTP fan-out po nodovima. To može presjeći mesh usred promjene i ostaviti dio nodova u starom stanju.
+- Novi state mora ići kroz Alfred kao staged radio-state paket: `version`, `activate_at`, željeno stanje po interfaceu (`wlan0`, `wlan1`, `wlan2`) i inicijator.
+- Svaki nod nakon primitka paketa lokalno validira da može primijeniti state, spremi pending state i objavi ACK kroz Alfred.
+- Dashboard smije pokrenuti coordinated apply tek kad svi očekivani/reachable nodovi objave ACK za istu verziju.
+- Ako ACK timeout istekne, apply se ne radi; UI mora prikazati koji nodovi nisu potvrdili.
+- Per-node toggle može ostati dijagnostička/dev opcija, ali produkcijski "all up/down" mora koristiti Alfred koordinaciju.
+
+**Implementirani Alfred radio-state tok:**
+- Alfred type `71`: radio-state package (`kind=radio_state`) i cancel package (`kind=radio_cancel`)
+- Alfred type `72`: radio ACK payload (`kind=radio_ack`, `version`, `hostname`, `ok`, `error`)
+- Local staged file: `/var/run/mesh_pending_radio_state.json`
+- Local ACK file: `/var/run/mesh_radio_ack_version`
+- Applied marker: `/var/run/mesh_applied_radio_version`
+- Persistent desired radio state: `/var/lib/mesh_radio_state.json`
+- Agent: `/usr/local/bin/mesh-radio-state.py sync`
+- Node-manager varijante (`node-manager.sh`, `node-manager-static.sh`, `node-manager-acs.sh`) pozivaju radio-state sync u glavnoj petlji.
+- `batman-if-setup.sh`, `sae-watchdog.sh`, `channel-election.sh` i node-manager channel restart logika moraju poštovati `/var/lib/mesh_radio_state.json`, da watchdog/channel election ne vrate namjerno ugašen radio.
+- Verificirano nakon deploya: `wlan0=down` i `wlan1=down` kroz Alfred workflow daju 4/4 ACK, nakon activationa na sva 4 noda ostaje samo `wlan2: active`; `wpa_supplicant@wlan0` i `wpa_supplicant@wlan1` su `inactive`, a `wpa_supplicant-s1g-wlan2` je `active`.
+- UI nakon ACK/scheduled poruke sada čeka `activate_at`, poll-a `/api/topology` i daje finalnu foreground obavijest: executed ako svi ciljani nodovi potvrde željeni active/down state, ili error s popisom nodova gdje stanje nije potvrđeno.
+- UI za sve `down` radio naredbe sada traži browser confirmation prije Alfred stagea. `up` naredbe ostaju bez confirmationa.
+
 **Po nodu zasebno:**
 - Isti toggleovi ali samo za odabrani nod
 
@@ -104,15 +129,33 @@ br0 (bridge)    ← bat0 + end0 + wlan3 (ako EUD wireless mode)
 - Zabrani gašenje interfacea ako je to jedina veza između dva dijela mesha (particija detection)
 - Logika: provjeri `batctl o` prije togglea — ako bi nod ostao isoliran, odbij s porukom
 
-**Implementacija togglea na nodu:**
+**Implementacija applyja na nodu:**
+- Ugasiti wlan interface znači zaustaviti njegov `wpa_supplicant` systemd service. Samo `batctl if del` + `ip link down` nije dovoljno, jer service ili watchdog mogu interface vratiti gore.
+- Upaliti wlan interface znači dignuti link, startati odgovarajući `wpa_supplicant` service i osigurati da je interface ponovno u `bat0`.
+- Standardni Wi-Fi koristi `wpa_supplicant@wlan0.service` / `wpa_supplicant@wlan1.service`.
+- HaLow koristi Morse/S1G supplicant service (`wpa_supplicant-s1g-wlan2.service` ili aktualni template naziv u install treeju). Provjeriti točan unit name na nodu prije finalnog koda.
+
 ```bash
-# Ugasiti interface (makni iz bat0, down):
+# Ugasiti interface:
 sudo batctl if del wlan0
+sudo systemctl stop wpa_supplicant@wlan0.service
 sudo ip link set wlan0 down
 
-# Upaliti interface (dodaj nazad u bat0):
+# Upaliti interface:
 sudo ip link set wlan0 up
+sudo systemctl start wpa_supplicant@wlan0.service
 sudo batctl if add wlan0
+```
+
+Za HaLow apply treba koristiti S1G/Morse service, npr.:
+```bash
+sudo batctl if del wlan2
+sudo systemctl stop wpa_supplicant-s1g-wlan2.service
+sudo ip link set wlan2 down
+
+sudo ip link set wlan2 up
+sudo systemctl start wpa_supplicant-s1g-wlan2.service
+sudo batctl if add wlan2
 ```
 
 ### 2. HaLow Channel & Bandwidth Selection
@@ -237,7 +280,7 @@ rpi5/rpi5-install/usr/local/bin/ethernet-autodetect.sh  # Start/stop perf-dashbo
 ```
 GET  /                          # Dashboard HTML
 GET  /api/topology              # Trenutna topologija (nodovi, interfacei, gateway/internet)
-POST /api/interface/toggle      # Toggle wlan interface na nodu(ovima)
+POST /api/interface/toggle      # Legacy/dev direct toggle; global production toggle mora ići kroz Alfred staged radio-state
 POST /api/halow/channel         # Postavi HaLow kanal/BW na sve nodove
 POST /api/wifi/channel          # Postavi 2.4/5 GHz kanal na sve nodove
 POST /api/txpower               # Postavi TX power po nodu/interfaceu
@@ -254,7 +297,7 @@ POST /api/upload/ventum         # curl -u upload tar.gz bundlea na Ventum
 Control API je mesh-local/server-to-server: dozvoljen je samo za localhost ili IP iz mesh subneta (`ipv4_network`), bez admin Basic autha. Admin UI je također bez Basic autha da se na mobitelu ne pojavljuje login dialog.
 
 ```
-POST /api/control/interface     # { "iface": "wlan0", "state": "up"|"down" }
+POST /api/control/interface     # Dev/per-node direct toggle; global production apply mora koristiti Alfred ACK workflow
 POST /api/control/halow_channel # { "channel": 42, "bw": "2MHz" }
 POST /api/control/wifi_channel  # { "interface": "wlan0", "channel": 6 }
 POST /api/control/txpower       # { "iface": "wlan0", "dbm": 15 }
@@ -281,7 +324,7 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
 
 1. **sudo bez passworda za specifične komande** — dodati u `/etc/sudoers.d/perf`:
    ```
-   radio ALL=(ALL) NOPASSWD: /usr/sbin/batctl, /sbin/ip link set wlan*
+   radio ALL=(ALL) NOPASSWD: /usr/sbin/batctl, /sbin/ip link set wlan*, /bin/systemctl start wpa_supplicant@wlan*.service, /bin/systemctl stop wpa_supplicant@wlan*.service, /bin/systemctl start wpa_supplicant-s1g-wlan*.service, /bin/systemctl stop wpa_supplicant-s1g-wlan*.service
    ```
 
 2. **iperf3 server management** — koristiti `iperf3 -s -D --one-off` (daemon, jedan klijent pa exit) da ne blokira

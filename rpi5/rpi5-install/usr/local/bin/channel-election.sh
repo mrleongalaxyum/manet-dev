@@ -49,6 +49,19 @@ get_current_freq() {
     fi
 }
 
+radio_iface_enabled() {
+    python3 - "$1" <<'PY'
+import json, sys
+iface = sys.argv[1]
+try:
+    with open('/var/lib/mesh_radio_state.json') as f:
+        state = json.load(f).get('desired', {}).get(iface, 'up')
+except Exception:
+    state = 'up'
+sys.exit(1 if state == 'down' else 0)
+PY
+}
+
 load_mesh_roles() {
     local mesh_ifaces=()
 
@@ -245,15 +258,23 @@ load_mesh_roles() {
 
     # Restart services *after* all configs are written
 	if [ "$DRY_RUN" = false ]; then
-    	if [ "$MIGRATION_2_4_NEEDED" = true ]; then
-    	    log "Restarting wpa_supplicant@${WPA_IFACE_2_4}.service..."
-    	    systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
-    	fi
+        if [ "$MIGRATION_2_4_NEEDED" = true ]; then
+            if radio_iface_enabled "$WPA_IFACE_2_4"; then
+                log "Restarting wpa_supplicant@${WPA_IFACE_2_4}.service..."
+                systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
+            else
+                log "Skipping restart for ${WPA_IFACE_2_4}; radio-state says down"
+            fi
+        fi
 
-    	if [ "$MIGRATION_5_0_NEEDED" = true ]; then
-    	    log "Restarting wpa_supplicant@${WPA_IFACE_5_0}.service..."
-    	    systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
-    	fi
+        if [ "$MIGRATION_5_0_NEEDED" = true ]; then
+            if radio_iface_enabled "$WPA_IFACE_5_0"; then
+                log "Restarting wpa_supplicant@${WPA_IFACE_5_0}.service..."
+                systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
+            else
+                log "Skipping restart for ${WPA_IFACE_5_0}; radio-state says down"
+            fi
+        fi
 	else
     	log "DRY RUN: Skipping service restarts"
 	fi
