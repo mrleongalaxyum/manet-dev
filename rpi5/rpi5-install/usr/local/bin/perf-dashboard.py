@@ -1039,6 +1039,7 @@ function renderMeasureStats(d) {
 
 function showTab(name) {
   _tab = name;
+  try { localStorage.setItem('perfDashboardTab', name); } catch(e) {}
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-pane').forEach(p => p.style.display = p.id === 'tab-' + name ? '' : 'none');
   if (name === 'sessions') loadSessions();
@@ -1385,7 +1386,11 @@ async function uploadVentum() {
 }
 
 window.onload = async () => {
-  showTab('topology');
+  const savedTab = (() => {
+    try { return localStorage.getItem('perfDashboardTab') || 'topology'; }
+    catch(e) { return 'topology'; }
+  })();
+  showTab(savedTab);
   await fetchTopo();
   buildIfaceControl();
   buildHalowConfig();

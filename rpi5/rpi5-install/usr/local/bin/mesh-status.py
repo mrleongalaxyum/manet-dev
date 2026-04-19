@@ -2911,6 +2911,15 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'Not found')
 
+    def do_DELETE(self):
+        if self._is_perf_host():
+            self._proxy_to_perf()
+            return
+
+        self.send_response(404)
+        self.end_headers()
+        self.wfile.write(b'Not found')
+
     def do_POST(self):
         if self._is_perf_host():
             self._proxy_to_perf()
