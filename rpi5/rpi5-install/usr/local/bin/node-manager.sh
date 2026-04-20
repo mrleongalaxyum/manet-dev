@@ -264,6 +264,8 @@ while true; do
         [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
         [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
         [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
+        BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));print(d['percentage'])" 2>/dev/null)
+        [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
         
         CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
         

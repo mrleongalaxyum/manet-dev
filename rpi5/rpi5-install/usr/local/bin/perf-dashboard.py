@@ -98,6 +98,17 @@ def has_internet():
     except Exception:
         return False
 
+def get_local_battery_percentage():
+    try:
+        with open('/run/battery_status.json') as f:
+            data = json.load(f)
+        pct = data.get('percentage')
+        if pct is not None:
+            return str(pct)
+    except Exception:
+        pass
+    return ''
+
 def parse_registry():
     nodes = {}
     try:
@@ -569,6 +580,9 @@ def build_topology():
         }
 
         if is_me:
+            live_battery = get_local_battery_percentage()
+            if live_battery:
+                node_info['battery'] = live_battery
             node_info['interfaces'] = {
                 'wlan0': {'active': 'wlan0' in active_ifaces, **iw_wlan0},
                 'wlan1': {'active': 'wlan1' in active_ifaces, **iw_wlan1},
@@ -578,6 +592,9 @@ def build_topology():
             # Fetch from remote node's /api/local via peer proxy
             try:
                 local = call_node_api(ip, '/api/local')
+                live_battery = local.get('battery')
+                if isinstance(live_battery, dict) and live_battery.get('percentage') is not None:
+                    node_info['battery'] = str(live_battery.get('percentage'))
                 ifaces_raw = local.get('interfaces', [])
                 node_info['interfaces'] = {
                     i['name']: {

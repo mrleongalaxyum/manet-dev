@@ -30,6 +30,7 @@ import ipaddress
 import socket
 import threading
 import time
+import urllib.request
 from urllib.parse import urlparse, parse_qs
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -424,6 +425,21 @@ def get_battery():
             except Exception:
                 continue
     return None
+
+def get_peer_local_data(peer_ip, timeout=1.0):
+    """Fetch live /api/local from a peer over the mesh; return {} on failure."""
+    if not peer_ip:
+        return {}
+    try:
+        ipaddress.ip_address(peer_ip)
+        req = urllib.request.Request(
+            f'http://{peer_ip}:80/api/local',
+            headers={'User-Agent': 'manet-status/1'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return {}
 
 def get_interfaces():
     """
@@ -846,6 +862,7 @@ def assemble_status_data():
     conf       = load_kv_file(MESH_CONF_FILE)
     state      = load_kv_file(MESH_STATE_FILE)
     nodes_raw  = parse_registry()
+    local_battery = get_battery()
     orig_tq, orig_map = run_batctl_originators()
     neighbors  = run_batctl_neighbors()
     gateways   = run_batctl_gateways()
@@ -898,6 +915,14 @@ def assemble_status_data():
             tq = 255
             self_found = True
 
+        battery = {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None
+        if is_me and local_battery and local_battery.get('percentage') is not None:
+            battery = local_battery
+        elif not is_me and ndata.get('IPV4_ADDRESS'):
+            peer_battery = get_peer_local_data(ndata.get('IPV4_ADDRESS'), timeout=0.8).get('battery')
+            if isinstance(peer_battery, dict) and peer_battery.get('percentage') is not None:
+                battery = peer_battery
+
         all_node_macs = [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()]
         is_direct = any(m in neighbor_macs for m in all_node_macs) or node_mac in neighbor_macs
         gw_info   = gw_mac_map.get(node_mac)
@@ -917,7 +942,7 @@ def assemble_status_data():
             )),
             'uptime':       fmt_uptime(ndata.get('UPTIME_SECONDS', '')),
             'cpu':          ndata.get('CPU_LOAD_AVERAGE', ''),
-            'battery':      {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None,
+            'battery':      battery,
             'mumble':       ndata.get('IS_MUMBLE_SERVER', 'false').lower() == 'true',
             'mediamtx':     ndata.get('IS_MEDIAMTX_SERVER', 'false').lower() == 'true',
             'ntp':          ndata.get('IS_NTP_SERVER', 'false').lower() == 'true',
