@@ -344,3 +344,14 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
 - GitHub: `mrleongalaxyum/manet-dev` (public) — measurements u `measurements/` folderu
 - Ventum measurements upload: `curl -u <user>:<password> -T <file> https://manet.ventum.hr/upload/rpi5/measurements/<file>`
 - Runtime config overridei u `/etc/mesh.conf`: `ventum_upload_url`, `ventum_auth` ili `ventum_user` + `ventum_password`
+
+---
+
+## 2026-04-19 UI refresh / FER identity
+
+- `manet.local` i `perf.local` su prebačeni na FER vizualni smjer: Paper grey / Deep space black / Power Yellow / Deep Blue, uz FER logo u headeru.
+- Dodan je dark mode toggle na oba GUI-ja. Izbor se pamti u `localStorage` (`manetUiTheme`), a prvi load prati system preference.
+- `perf.local` ima čvrsti sticky tab bar, kompaktniji header nakon scrolla i diskretniji FER accent strip ispod tabova.
+- Button styling je usklađen s temom: primary/action gumbi koriste FER žutu, sekundarni deep-blue/outline, destruktivne akcije ostaju crvene ali bez pastelnog alert izgleda.
+- Status pillovi poput `INET OK` su smireni na neutralnu površinu s diskretnim status rubom da ne iskaču iz teme.
+- Auto-refresh ostaje periodički i ne prekida aktivno editiranje input/select polja.
