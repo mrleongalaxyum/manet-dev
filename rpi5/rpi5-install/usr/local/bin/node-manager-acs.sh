@@ -38,6 +38,7 @@ REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
 RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
+HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
@@ -138,6 +139,17 @@ should_perform_action() {
 get_current_freq() {
     local conf_file=$1
     grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
+}
+
+collect_radio_mcs() {
+    WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
+    WLAN1_TX_MCS=""; WLAN1_RX_MCS=""
+    WLAN2_TX_MCS=""; WLAN2_RX_MCS=""
+    [ -x "$HALOW_MCS_SUMMARY" ] || return 0
+    for iface in wlan0 wlan1 wlan2; do
+        [ -d "/sys/class/net/$iface" ] || continue
+        eval "$("$HALOW_MCS_SUMMARY" --iface "$iface" --shell 2>/dev/null || true)"
+    done
 }
 
 radio_iface_enabled() {
@@ -342,6 +354,7 @@ while true; do
             done
             
             CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+            collect_radio_mcs
             
             # Encode (no scan data, in lobby mode)
             ENCODER_ARGS=(
@@ -351,6 +364,13 @@ while true; do
                 "--syncthing-id" "$SYNCTHING_ID"
 				"--ipv4-chunk" "$MY_CHUNK"
                 "--timestamp" "$NOW"
+                "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
+                "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
+                "--wifi-5-tx-mcs" "${WLAN1_TX_MCS:-}"
+                "--wifi-5-rx-mcs" "${WLAN1_RX_MCS:-}"
+                "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
+                "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
+                "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
             )
             [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
@@ -460,6 +480,7 @@ while true; do
             [ -f /var/run/tourguide_state ] && source /var/run/tourguide_state
 
             # Encode
+            collect_radio_mcs
             ENCODER_ARGS=(
                 "--hostname" "$HOSTNAME"
                 "--mac-addresses" "${ALL_MACS[@]}"
@@ -469,6 +490,13 @@ while true; do
                 "--timestamp" "$NOW"
                 "--last-tourguide-timestamp" "$LAST_TOURGUIDE_TIME"
                 "--last-tourguide-radio" "$LAST_TOURGUIDE_RADIO"
+                "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
+                "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
+                "--wifi-5-tx-mcs" "${WLAN1_TX_MCS:-}"
+                "--wifi-5-rx-mcs" "${WLAN1_RX_MCS:-}"
+                "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
+                "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
+                "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
             )
             [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")

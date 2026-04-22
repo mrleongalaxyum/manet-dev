@@ -1,5 +1,83 @@
 # MANET Change History
 
+## 2026-04-22
+
+### FER brand alignment for `manet.local` and `perf.local`
+
+- Verified GUI alignment against the official FER brandbook PDF from `fer.unizg.hr`.
+- Standardized both dashboards on FER typography and color tokens:
+  - font stack `Roobert, Arial, sans-serif`
+  - neutral base `#EBEAE8` / `#02000D`
+  - accents `#ECB000` and `#00003F`
+- Replaced the previous internet-fetched FER image usage with inline SVG lockups embedded directly in:
+  - `mesh-status.py`
+  - `perf-dashboard.py`
+- Simplified the lockup to a monochrome FER mark so it follows the brandbook rule of black/white logo on brand surfaces and works fully offline on nodes.
+- Removed remaining non-FER UI drift from badges and state chips:
+  - self/info states now use FER deep blue
+  - gateway/warn emphasis now uses FER yellow
+  - red remains reserved for actual fault/error states
+- Reduced decorative striping and grid styling in both GUIs and replaced it with cleaner FER-style accent bands and surface treatment.
+- Kept the glow effect on `manet.local`, but reworked it into a controlled yellow/blue FER halo in the topology panel instead of the previous generic dashboard decoration.
+
+### `manet.local` → `perf.local` authenticated handoff
+
+- Added a `PERF.LOCAL` button to `manet.local`.
+- Clicking it now validates the provisioned `admin_password` from `/etc/mesh.conf` before sending the user into `perf.local`.
+- The browser receives a derived auth token instead of the raw password.
+- `perf.local` now converts that token into a persistent cookie (`manet_perf_auth`) and strips the token from the URL on redirect.
+- Added a direct-access fallback password page on `perf.local` so opening it without a cookie still works cleanly.
+- Updated the button UX so `manet.local` now redirects straight to `perf.local` without an extra prompt; authentication stays entirely on the `perf.local` login page.
+- Centered the `perf.local` password card more reliably on mobile and small viewports using viewport-safe height and padded grid centering.
+
+### `manet.local` mobile scroll, stutter, and layout pass
+
+- Removed one-finger canvas panning on `manet.local`; single-finger touch now scrolls the whole page normally.
+- Kept topology interaction as:
+  - tap to select a node
+  - two-finger pinch to zoom
+- Replaced repeated immediate canvas redraws outside the physics loop with `requestAnimationFrame`-queued redraw scheduling to reduce visible scroll and hover stutter.
+- Switched the page away from a fixed full-height split layout toward a document-scroll-friendly panel layout with:
+  - padded grid structure on desktop
+  - stacked mobile layout
+  - rounded topology and side panels
+  - less nested internal scrolling
+- Smoothed transitions on node cards and cleaned the topology background so motion feels lighter and more modern on mobile, especially in landscape orientation.
+
+### HaLow TX power GUI clamping by bandwidth
+
+- Fixed HaLow TX power option handling in both GUI/backend paths so bandwidth changes clamp to valid live-tested maxima instead of leaving impossible combinations selected.
+- Empirically validated on a live node:
+  - `1 MHz -> 24 dBm`
+  - `2 MHz -> 24 dBm`
+  - `4 MHz -> 22 dBm`
+- Added those caps to the code as an explicit table and updated the GUI dropdown logic so:
+  - switching `1 MHz -> 4 MHz` drops the selected TX power to `22 dBm`
+  - switching `4 MHz -> 1 MHz` offers the `24 dBm` maximum again
+- Updated and deployed:
+  - `rpi5/rpi5-install/usr/local/bin/perf-dashboard.py`
+  - `rpi5/rpi5-install/usr/local/bin/mesh-status.py`
+
+### perf.local: Alfred-carried radio rate summary for HaLow and Wi-Fi
+
+- Added compact per-interface link-rate summaries to the Alfred status payload so `perf.local` can show current radio modulation without polling every node directly.
+- Source of truth is `iw dev <iface> station dump` on each node, sampled locally inside node-manager publish loop, then propagated through existing protobuf gossip.
+- All three mesh radios are covered:
+  - `wlan0` -> Wi-Fi 2.4 GHz
+  - `wlan1` -> Wi-Fi 5 GHz
+  - `wlan2` -> HaLow
+- Display format is intentionally compact for mobile UI: `MCSx Nn [GI] [BW]`, for example `MCS9 N1 SGI 20M`.
+- `perf.local` topology and interface cards now read those summaries from Alfred-backed topology data rather than from direct live fetches.
+
+### Bug fixed: protobuf generator/runtime mismatch on live nodes
+
+- Newly generated `NodeInfo_pb2.py` from a modern local `protoc` imported `google.protobuf.runtime_version`.
+- Live nodes ship `protobuf 4.21.12`, which does not expose that symbol.
+- Result was a hard failure in both `encoder.py` and `decoder.py`, followed by repeated:
+  - `REGISTRY: Warning: decoder.py failed with exit code 1`
+- Fix: keep the updated descriptor payload, but remove the newer runtime gate from checked-in `NodeInfo_pb2.py` so it stays compatible with the node image runtime.
+- After redeploy, registry building recovered and Alfred once again carried valid peer state for all 4 nodes.
+
 ## 2026-04-17 (session 4)
 
 ### Bug fixed: HaLow (wlan2) S1G "Invalid S1G configuration" on EU deployment
@@ -266,6 +344,126 @@ address=/manet.local/$br0_secondary
 - Selektirani node dobiva bijeli border, pojačan glow (radijus 4.5× umjesto 3×, opacity 0.7 umjesto 0.3), i blagi fill
 - Lokalni (centralni) node je uvijek highlightan dok nije selektiran neighbor (jer je defaultno prikazan)
 - `isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID === n.id)`
+
+### 2026-04-22 - FER logo asset correction
+
+- Lokalni `rpi5/rpi5-install/usr/local/share/manet/fer-logo.svg` placeholder zamijenjen je službenim FER SVG assetom preuzetim s `https://www.fer.unizg.hr/_pub/themes_static/fer_2025/default/img/FERlogo.svg`.
+- `manet.local`, `perf.local` i `perf.local` auth stranica i dalje serviraju logo lokalno preko `/assets/fer-logo.svg`, ali sada koriste točan FER-ov originalni asset umjesto ručno generirane zamjene.
+
+### 2026-04-22 - PERF to OVERVIEW shortcut
+
+- `perf.local` header sada ima `OVERVIEW` gumb koji vodi na `http://manet.local/`.
+- Stil gumba prati isti FER button system kao `MANAGE` na `manet.local`.
+
+### 2026-04-22 - THIS NODE badge refinement
+
+- U `manet.local` je uklonjena zvjezdica uz `THIS NODE`.
+- Lokalni node sada koristi umjeren, profesionalan glow badge u FER paleti umjesto stare tekstualne oznake sa zvjezdicom.
+
+### 2026-04-22 - Canvas single-touch disabled
+
+- `manet.local` topo canvas više ne reagira na single-touch tap.
+- Na touch uređajima jedan prst sada uvijek ostaje za scroll cijelog dashboarda; canvas zadržava samo two-finger pinch zoom.
+
+### 2026-04-22 - PERF logout
+
+- `perf.local` sada ima `LOGOUT` opciju na dnu stranice.
+- Logout briše `manet_perf_auth` cookie kroz `/auth/perf-logout` i vraća korisnika na `perf.local` login ekran.
+
+### 2026-04-22 - FER logo theme variants
+
+- `manet.local` i `perf.local` headeri sada koriste veći službeni FER logo.
+- Light tema prikazuje crni logo, a dark tema bijelu varijantu kroz theme-aware prikaz.
+- `perf.local` login ekran koristi veliki službeni FER logo i dark/light prilagodbu preko `prefers-color-scheme`.
+
+### 2026-04-22 - PERF login form overflow fix
+
+- `perf.local` login input i submit button sada koriste `box-sizing: border-box` i `width: 100%`.
+- Time password polje više ne strši van login boxa na užim ekranima.
+
+### 2026-04-22 - Theme sync and login cleanup
+
+- `manet.local` i `perf.local` sada prenose isti `theme` pri redirectu između dashboarda i login ekrana.
+- `perf.local` login više nema žuti accent iza loga, a CTA koristi FER žutu umjesto plave.
+- Dashboard header lockup koristi samo FER mark crop iz službenog SVG-a, bez punog wordmarka.
+
+### 2026-04-22 - MANET node list order
+
+- `MESH NODES` lista je premještena iznad topologije u desnom panelu.
+- Selektirani node sada otvara detail inline unutar vlastitog entryja umjesto starog drawer panela.
+
+### 2026-04-22 - Canvas select cleanup
+
+- Klik na node na `manet.local` canvasu više ne koristi dodatni canvas-select flow.
+- Canvas selection sada samo otvara inline detail u listi i glatko odskrola do odgovarajuceg node entryja.
+
+### 2026-04-22 - Header layout refinement
+
+- `manet.local` header je prebačen na tri reda, s prvim redom za FER logo i `MANET//STAT`.
+- `perf.local` FER lockup je proširen tako da stane cijeli službeni logo bez cropa.
+
+### 2026-04-22 - MANET compact node list
+
+- `manet.local` je vraćen na raspored s canvasom iznad liste nodova.
+- Lista nodova je zbijena i koristi `click to expand / click to collapse` inline detalje.
+
+### 2026-04-22 - Canvas tooltip removed
+
+- `manet.local` canvas više ne rendera floating mini info window nad nodeovima.
+- Canvas interakcija je svedena na hover highlight i click-to-scroll/select ponašanje.
+
+### 2026-04-22 - FER sign-only variants
+
+- Dashboardi i login sada koriste lokalne sign-only FER SVG varijante iz `fer-logo-svg/`.
+- Light koristi crni znak, a dark bijeli znak bez CSS invert workarounda.
+
+### 2026-04-23 - Login logo rollback and larger dashboard logos
+
+- `perf.local` login vraćen je na puni prethodni FER logo (`fer-logo.svg`).
+- Dashboard logo lockup na `manet.local` i `perf.local` povećan je na približno `25vw` uz `clamp()` ograničenja.
+
+### 2026-04-22 - MANET dashboard de-blue pass
+
+- `manet.local` dashboard više ne koristi plave dekorativne akcente.
+- Header, topo panel, badgevi, role chipovi i local-node highlight prebačeni su na neutralne tonove i FER žutu.
+
+### 2026-04-23 - Yellow dashboard CTAs and login autofill
+
+- `MANAGE` na `manet.local` i `OVERVIEW` na `perf.local` koriste puni FER yellow CTA stil umjesto muted/transparent varijante.
+- `perf.local` login CTA sada se zove `Login`.
+- Login forma pokušava automatski submitati kad browser autofilla management password.
+- FER dashboard logo na `manet.local` i `perf.local` dodatno je povećan za čitljiviji header.
+
+### 2026-04-23 - Overview status dot and larger FER logo
+
+- `ALL OK` status na `manet.local` overview headeru više ne duplicira status točku.
+- FER logo na `manet.local` i `perf.local` dodatno je povećan na jači desktop/mobile clamp.
+- `perf.local` compact header više ne spušta FER logo na premalu `88px` širinu.
+
+### 2026-04-23 - Browser login memory
+
+- `perf.local` login forma sada izlaže browser-friendly `username` + `current-password` par kako bi Chrome/Google password manager lakše ponudio spremanje lozinke.
+- `manet_perf_auth` cookie produžen je na 180 dana da se login dulje pamti u browseru.
+
+### 2026-04-23 - MANAGE redirect fix
+
+- `MANAGE` na `manet.local` više ne vodi direktno na `/auth/perf-login`.
+- Redirect sada ide na `perf.local/`, tako da postojeći `manet_perf_auth` cookie preskače login kad je korisnik već prijavljen.
+
+### 2026-04-23 - Header title spacing
+
+- FER logo i `MANET//STAT` / `MANET//PERF` tekst približeni su u headeru na oba dashboarda.
+- Smanjeni su `gap` i desni padding logo lockupa na desktop i mobile breakpointima.
+
+### 2026-04-23 - Narrower logo box
+
+- FER header lockup na `manet.local` i `perf.local` dodatno je sužen da ne rezervira prazan prostor desno od znaka.
+- Logo box sada koristi uži clamp i `flex: 0 0 auto` kako bi naslov bio stvarno bliže logotipu.
+
+### 2026-04-22 - PERF tab styling rollback
+
+- `perf.local` tabovi vraćeni su na stariji underline stil.
+- Aktivni tab više nema plavi/yellow fill blok, nego čisti žuti underline u FER paleti.
 
 **Uklonjene komponente:** `local-toggle`, `local-panel`, `LOCAL_COLLAPSED`, `local-chevron`, `renderLocalPanel` → `peer-drawer-body`
 
