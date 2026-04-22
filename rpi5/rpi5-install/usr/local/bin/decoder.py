@@ -46,6 +46,13 @@ def main():
 
         # Config sync ACK
         print(f"CONFIG_ACK_VERSION='{node_info.config_ack_version}'")
+        print(f"HALOW_TX_MCS='{node_info.halow_tx_mcs}'")
+        print(f"HALOW_RX_MCS='{node_info.halow_rx_mcs}'")
+        print(f"HALOW_MCS_PEER='{node_info.halow_mcs_peer}'")
+        print(f"WIFI_24_TX_MCS='{node_info.wifi_24_tx_mcs}'")
+        print(f"WIFI_24_RX_MCS='{node_info.wifi_24_rx_mcs}'")
+        print(f"WIFI_5_TX_MCS='{node_info.wifi_5_tx_mcs}'")
+        print(f"WIFI_5_RX_MCS='{node_info.wifi_5_rx_mcs}'")
 
         report_list = []
         for result in node_info.channel_report.results:

@@ -31,6 +31,7 @@ REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
 RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
+HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
@@ -116,6 +117,17 @@ except Exception:
     state = 'up'
 sys.exit(1 if state == 'down' else 0)
 PY
+}
+
+collect_radio_mcs() {
+    WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
+    WLAN1_TX_MCS=""; WLAN1_RX_MCS=""
+    WLAN2_TX_MCS=""; WLAN2_RX_MCS=""
+    [ -x "$HALOW_MCS_SUMMARY" ] || return 0
+    for iface in wlan0 wlan1 wlan2; do
+        [ -d "/sys/class/net/$iface" ] || continue
+        eval "$("$HALOW_MCS_SUMMARY" --iface "$iface" --shell 2>/dev/null || true)"
+    done
 }
 
 load_mesh_wpa_confs() {
@@ -248,6 +260,7 @@ while true; do
         done
         
         CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+        collect_radio_mcs
         
         # Encode (no scan data, no limp mode, no tourguide in static mode)
         ENCODER_ARGS=(
@@ -259,6 +272,13 @@ while true; do
             "--timestamp" "$NOW"
             "--data-channel-2-4" "$STATIC_FREQ_2_4"
             "--data-channel-5-0" "$STATIC_FREQ_5_0"
+            "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
+            "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
+            "--wifi-5-tx-mcs" "${WLAN1_TX_MCS:-}"
+            "--wifi-5-rx-mcs" "${WLAN1_RX_MCS:-}"
+            "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
+            "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
+            "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
         )
         [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
         [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")

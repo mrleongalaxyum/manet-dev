@@ -20,6 +20,9 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - Dugi iperf/ping control pozivi moraju imati timeout dulji od trajanja testa. Kratki HTTP timeout uzrokuje lažne `timed out` failove i može ostaviti iperf server zauzet za sljedeći test.
 - Hop matrix tablica i hop-count računanje su uklonjeni iz perf dashboarda; hop/multihop vizualizacija ostaje u glavnom `mesh-status.py` topology prikazu.
 - HaLow runtime info se prvo pokušava čitati kroz Morse driver tooling (`morse_cli` channel info, JSON ili parsable text), jer `iw` može prijaviti krivi standardni Wi-Fi kanal. `wpa_supplicant_s1g` config ostaje samo fallback/debug.
+- Radio link summaries za `wlan0`, `wlan1` i `wlan2` sada se skupljaju lokalno na svakom nodu iz `iw dev <iface> station dump`, pa se kroz Alfred type `68` propagiraju do `perf.local`. Nema dodatnog dashboard-side streamanja po nodovima.
+- Format prikaza je kompaktan i mobile-safe: `MCSx Nn [GI] [BW]`, npr. `MCS9 N1 SGI 20M`.
+- Trenutni protobuf field names su ostali povijesni (`*_tx_mcs`, `*_rx_mcs`), ali sadržaj tih polja više nije samo goli MCS broj nego kratki rate summary string.
 
 ### Otvoreno / sljedeći koraci
 - Provjeriti točnu `morse_cli` runtime sintaksu na fizičkom nodu. Implementacija trenutno pokušava više varijanti, uključujući `morse_cli -i wlan2 channel -j`, `--json` i text output.
@@ -28,6 +31,8 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - Zamijeniti trenutni direktni interface toggle fan-out s Alfred koordiniranim radio-state workflowom: željeno stanje se prvo propagira kroz mesh, svaki nod ACK-a staging, a tek nakon svih ACK-ova ide koordinirani apply.
 - Gašenje/paljenje wlan interfacea mora se raditi kroz odgovarajući `wpa_supplicant` systemd service. Sam `ip link down` nije dovoljan jer service/watchdog može vratiti interface.
 - Implementirano: `perf-dashboard.py` za `/api/interface/toggle` sada objavljuje radio-state kroz Alfred type `71`, čeka ACK-ove kroz Alfred type `72`, pa objavljuje isti version s `activate_at`. Čvorovi obrađuju pakete kroz `mesh-radio-state.py sync`, koji se poziva iz node-manager petlje.
+- Implementirano: `halow-mcs-summary.py` više nije samo HaLow helper po imenu nego zajednički extractor za `wlan0/wlan1/wlan2`; node-manager ga zove lokalno prije Alfred publisha.
+- Implementirano: `NodeInfo_pb2.py` u install treeju je ručno zadržan kompatibilan s runtimeom na nodovima (`protobuf 4.21.12`). Ako se opet generira novijim `protoc`-om i ostavi `runtime_version` import, encoder/decoder će pasti na živim nodovima.
 
 ---
 
