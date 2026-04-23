@@ -200,6 +200,29 @@ is_hosting_service() {
     return 1
 }
 
+is_hosting_mumble_service() {
+    if systemctl is-active --quiet mumble-server.service; then
+        if [ -f /etc/mesh.conf ]; then
+            while IFS='=' read -r key value; do
+                [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+                case "$key" in
+                    ipv4_network)
+                        IPV4_NETWORK="$value"
+                        ;;
+                esac
+            done < /etc/mesh.conf
+        fi
+
+        local CALC_OUTPUT
+        CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+        local FIRST_IP
+        FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
+        ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/" && return 0
+    fi
+    return 1
+}
+
 # === MAIN SETUP ===
 log "Starting Mesh Node Manager (Static Channel Mode)."
 log "Static channels: 2.4G=${STATIC_FREQ_2_4}, 5G=${STATIC_FREQ_5_0}"
@@ -248,6 +271,7 @@ while true; do
         IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
         IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
         IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
+        IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
         
         # Gather MACs
         ALL_MACS=("$MY_MAC")
@@ -284,6 +308,7 @@ while true; do
         [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
         [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
         [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
+        [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
         BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));print(d['percentage'])" 2>/dev/null)
         [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
         

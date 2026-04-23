@@ -337,6 +337,24 @@ For change history and bug log see [history.md](history.md).
 - Dodatni follow-up sužava `.fer-lockup` clamp na oba dashboarda jer je ranije preširok logo box ostavljao vidljiv prazan prostor.
 - Lockup sada ostaje velik, ali više ne gura `MANET//STAT` i `MANET//PERF` predaleko udesno.
 
+### 2026-04-23 - mDNS aliases for services
+
+- Live nodovi imaju `avahi-daemon` s `allow-interfaces=br0` i `enable-reflector=no`, pa mDNS ostaje lokalni na EUD AP segmentu.
+- Dodan je `mesh-mdns-update.sh` + systemd timer koji iz `/var/run/mesh_node_registry` odlučuje jesu li `mumble` i `mediamtx` aktivni, a zatim objavljuje njihove stabilne service VIP adrese kroz `/etc/avahi/hosts`.
+- `mesh-ip-manager.sh` više ne piše ručno samo `manet.local` i `perf.local`, nego poziva isti helper kako bi svi lokalni aliases ostali konzistentni.
+
+### 2026-04-23 - Mumble registry repair
+
+- Live dijagnostika je pokazala da `mumble-election.sh` uredno starta iz `node-manager` petlje, ali pada s `ERROR: 'sqlite3' command not found`.
+- `radio-setup.sh` je proširen da instalira `sqlite3` za buduće reprovisioning-e.
+- `node-manager.sh`, `node-manager-static.sh` i `node-manager-acs.sh` sada publishe Mumble service flag na isti način kao MediaMTX, ali samo kad lokalni node stvarno drži Mumble VIP (`HostMin + 2`).
+
+### 2026-04-23 - Dedicated mDNS publisher
+
+- `avahi/hosts` se pokazao nedovoljnim za pouzdano `.local` hostname resolution na mobitelu.
+- Dodan je `mesh-mdns-publisher.py` + `mesh-mdns-publisher.service` koji preko `python3-zeroconf` eksplicitno objavljuje `mumble.local` i `mtx.local` samo na `br0`.
+- `mesh-mdns-update.sh` ostaje zadužen samo za `manet.local` i `perf.local`.
+
 ### 2026-04-22 - MANET palette cleanup
 
 - `mesh-status.py` dashboard pass uklanja plave tematske akcente s glavnog `manet.local` UI-ja.

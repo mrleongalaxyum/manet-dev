@@ -389,13 +389,9 @@ server=8.8.8.8
 log-dhcp
 EOF
 
-    # Publish perf.local and manet.local via mDNS (avahi static hosts)
-    # avahi is restricted to wlan3 only, so no inter-node conflicts
-    cat > /etc/avahi/hosts <<EOF2
-$br0_primary perf.local
-$br0_primary manet.local
-EOF2
-    systemctl is-active --quiet avahi-daemon && systemctl reload-or-restart avahi-daemon || true
+    # Publish perf.local/manet.local plus dynamic service aliases via mDNS.
+    # Avahi is restricted to the AP-facing interface and reflector remains off.
+    /usr/local/bin/mesh-mdns-update.sh || true
 
     # Ensure dnsmasq is unmasked, enabled, and running
     systemctl unmask dnsmasq.service 2>/dev/null

@@ -460,6 +460,24 @@ address=/manet.local/$br0_secondary
 - FER header lockup na `manet.local` i `perf.local` dodatno je sužen da ne rezervira prazan prostor desno od znaka.
 - Logo box sada koristi uži clamp i `flex: 0 0 auto` kako bi naslov bio stvarno bliže logotipu.
 
+### 2026-04-23 - Local mDNS service aliases
+
+- Potvrđeno je da je `avahi-daemon` reflector na nodovima isključen (`enable-reflector=no`) i ograničen na AP-facing `br0`.
+- Dodan je `mesh-mdns-update.sh` koji generira `/etc/avahi/hosts` iz lokalnog `br0` IP-a i `/var/run/mesh_node_registry`.
+- `mumble.local` i `mtx.local` objavljuju se kroz stabilne service VIP adrese kad registry potvrdi da je servis aktivan, dok `manet.local` i `perf.local` ostaju lokalni na svakom AP nodeu.
+
+### 2026-04-23 - Mumble leader publish fix
+
+- Otkriveno je da `mumble-election.sh` pada na live nodovima zbog nedostajućeg `sqlite3` paketa.
+- `radio-setup.sh` sada instalira `sqlite3` kako bi Mumble election mogao odabrati leadera i podignuti VIP.
+- Sva tri `node-manager` toka sada publishe `--is-mumble-server` kad je lokalni node stvarni Mumble VIP holder.
+
+### 2026-04-23 - Real mDNS responder for service aliases
+
+- Pokazalo se da `/etc/avahi/hosts` nije dovoljan da mobiteli pouzdano resolveaju `mumble.local` i `mtx.local`.
+- Dodan je `mesh-mdns-publisher.py` koji preko `python3-zeroconf` aktivno objavljuje `mumble.local` i `mtx.local` na `br0`.
+- `mesh-mdns-update.sh` je vraćen na lokalne `manet.local` i `perf.local` Avahi host alias-e, dok service alias-e sada vodi zasebni responder.
+
 ### 2026-04-22 - PERF tab styling rollback
 
 - `perf.local` tabovi vraćeni su na stariji underline stil.
