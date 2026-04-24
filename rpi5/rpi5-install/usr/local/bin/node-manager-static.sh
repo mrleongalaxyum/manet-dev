@@ -311,7 +311,11 @@ while true; do
         [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
         BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));print(d['percentage'])" 2>/dev/null)
         [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
-        
+        UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+        [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
+        CPU_LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+        [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
+
         CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
         
         if [ -n "$CURRENT_PAYLOAD" ]; then
