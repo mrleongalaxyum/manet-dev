@@ -5,6 +5,11 @@ import argparse
 import json
 import NodeInfo_pb2
 
+
+def format_shell_float(value, decimals=2):
+    return f"{float(value):.{decimals}f}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Decode NodeInfo protobuf message.")
     parser.add_argument("b64_string", help="The Base64 encoded protobuf string.")
@@ -33,7 +38,7 @@ def main():
         print(f"IS_MEDIAMTX_SERVER={str(node_info.is_mediamtx_server).lower()}")
         print(f"UPTIME_SECONDS={node_info.uptime_seconds}")
         print(f"BATTERY_PERCENTAGE={node_info.battery_percentage}")
-        print(f"CPU_LOAD_AVERAGE={node_info.cpu_load_average}")
+        print(f"CPU_LOAD_AVERAGE={format_shell_float(node_info.cpu_load_average)}")
         print(f"DATA_CHANNEL_2_4='{node_info.data_channel_2_4}'")
         print(f"DATA_CHANNEL_5_0='{node_info.data_channel_5_0}'")
         print(f"LAST_SEEN_TIMESTAMP={node_info.last_seen_timestamp}")

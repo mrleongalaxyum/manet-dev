@@ -577,6 +577,59 @@ def get_peer_local_data(peer_ip, timeout=1.0):
     except Exception:
         return {}
 
+
+def best_orig_entry_for_node(node, orig_map):
+    if not isinstance(node, dict):
+        return None
+    node_all_macs = set(node.get('all_macs', []))
+    raw_mac = norm_mac(node.get('mac', ''))
+    if raw_mac:
+        node_all_macs.add(raw_mac)
+    best_entry = None
+    for omac, odata in orig_map.items():
+        if omac in node_all_macs:
+            if best_entry is None or odata.get('tq', 0) > best_entry.get('tq', 0):
+                best_entry = odata
+    return best_entry
+
+
+def resolve_hop_count(node_id, node_by_id, orig_map, mac_to_node_id, visited=None):
+    if visited is None:
+        visited = set()
+    if node_id in visited:
+        return None
+    visited.add(node_id)
+
+    node = node_by_id.get(node_id)
+    if not node or node.get('is_me'):
+        return None
+    if node.get('is_direct'):
+        return 1
+
+    best_entry = best_orig_entry_for_node(node, orig_map)
+    if not best_entry:
+        return None
+
+    node_all_macs = set(node.get('all_macs', []))
+    raw_mac = norm_mac(node.get('mac', ''))
+    if raw_mac:
+        node_all_macs.add(raw_mac)
+
+    nexthop = norm_mac(best_entry.get('nexthop', ''))
+    if not nexthop:
+        return None
+    if nexthop in node_all_macs:
+        return 1
+
+    via_id = mac_to_node_id.get(nexthop)
+    if not via_id or via_id == node_id:
+        return None
+
+    via_hops = resolve_hop_count(via_id, node_by_id, orig_map, mac_to_node_id, visited)
+    if via_hops is None:
+        return None
+    return via_hops + 1
+
 def get_interfaces():
     """
     Return list of interface dicts with role, health, and fault details.
@@ -660,14 +713,14 @@ def get_interfaces():
             pass
         iw_info[iname]['driver'] = driver
         if 'morse' in driver:
-            iw_info[iname]['band_label'] = 'HaLow 900MHz'
+            iw_info[iname]['band_label'] = 'HaLow'
         else:
             # Try runtime freq first, fall back to phy capability
             freq_str = iw_info[iname].get('freq', '')
             try:
                 freq_f = float(freq_str)
                 if freq_f < 2.0:
-                    iw_info[iname]['band_label'] = 'HaLow 900MHz'
+                    iw_info[iname]['band_label'] = 'HaLow'
                 elif freq_f < 3.0:
                     iw_info[iname]['band_label'] = '2.4 GHz'
                 else:
@@ -940,6 +993,34 @@ def get_local_uptime():
     except Exception:
         return ''
 
+
+def enrich_interfaces_with_registry_mcs(ifaces, node_data):
+    if not ifaces or not isinstance(node_data, dict):
+        return ifaces
+
+    mcs_by_iface = {
+        'wlan0': {
+            'tx_mcs': node_data.get('WIFI_24_TX_MCS', ''),
+            'rx_mcs': node_data.get('WIFI_24_RX_MCS', ''),
+        },
+        'wlan1': {
+            'tx_mcs': node_data.get('WIFI_5_TX_MCS', ''),
+            'rx_mcs': node_data.get('WIFI_5_RX_MCS', ''),
+        },
+        'wlan2': {
+            'tx_mcs': node_data.get('HALOW_TX_MCS', ''),
+            'rx_mcs': node_data.get('HALOW_RX_MCS', ''),
+        },
+    }
+
+    for iface in ifaces:
+        if not isinstance(iface, dict):
+            continue
+        extra = mcs_by_iface.get(iface.get('name', ''), {})
+        iface['tx_mcs'] = extra.get('tx_mcs', '')
+        iface['rx_mcs'] = extra.get('rx_mcs', '')
+    return ifaces
+
 def assemble_local_data():
     conf     = load_kv_file(MESH_CONF_FILE)
     state    = load_kv_file(MESH_STATE_FILE)
@@ -958,6 +1039,8 @@ def assemble_local_data():
         if norm_mac(ndata.get('MAC_ADDRESS', '')) == my_mac or ndata.get('HOSTNAME', '') == hostname:
             my_node = ndata
             break
+
+    ifaces = enrich_interfaces_with_registry_mcs(ifaces, my_node)
 
     # GPS — placeholder, will be populated when registry has GPS fields
     gps = {
@@ -1103,6 +1186,7 @@ def assemble_status_data():
             'ch_5g':        ndata.get('DATA_CHANNEL_5_0', ''),
             'limp':         ndata.get('IS_IN_LIMP_MODE', 'false').lower() == 'true',
             'all_macs':     [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()],
+            'hop_count':    None,
         })
 
     # If self not in registry, inject a placeholder
@@ -1117,6 +1201,7 @@ def assemble_status_data():
             'uptime': '', 'cpu': '', 'battery': None,
             'mumble': False, 'mediamtx': False, 'ntp': False,
             'state': 'ACTIVE', 'ch_2g': '', 'ch_5g': '', 'limp': False,
+            'hop_count': None,
         })
 
     node_list.sort(key=lambda n: (not n['is_me'], -(n['tq'] if n['tq'] is not None else -1)))
@@ -1128,6 +1213,12 @@ def assemble_status_data():
         for m in node.get('all_macs', []):
             mac_to_node_id[m] = node['id']
         mac_to_node_id[norm_mac(node['mac'])] = node['id']
+    node_by_id = {node['id']: node for node in node_list}
+
+    for node in node_list:
+        if node.get('is_me'):
+            continue
+        node['hop_count'] = resolve_hop_count(node['id'], node_by_id, orig_map, mac_to_node_id)
 
     edges = []
     self_node = next((n for n in node_list if n['is_me']), None)
@@ -2262,6 +2353,8 @@ function renderLocalPanel(d) {
       const stateLabel = iface.state || '?';
       const addrs = iface.addrs && iface.addrs.length
         ? `<div class="iface-addrs">${iface.addrs.join(' &nbsp; ')}</div>` : '';
+      const mcs = (iface.tx_mcs || iface.rx_mcs)
+        ? `<div class="iface-addrs">TX ${iface.tx_mcs || '—'} &nbsp; RX ${iface.rx_mcs || '—'}</div>` : '';
       const faultLines = (iface.faults || []).map(f =>
         `<div class="${iface.health === 'fault' ? 'iface-fault' : 'iface-warn'}">${f}</div>`
       ).join('');
@@ -2273,6 +2366,7 @@ function renderLocalPanel(d) {
         </div>
         ${iface.detail ? `<div class="iface-detail">${iface.detail}</div>` : ''}
         ${addrs}
+        ${mcs}
         ${faultLines}
       </div>`;
     }).join('');
@@ -2461,6 +2555,8 @@ function renderPeerDrawer(d, hostname) {
       const label = roleLabel[iface.role] || iface.role.toUpperCase();
       const sc = iface.state === 'UP' ? 'up' : iface.state === 'DOWN' ? 'down' : 'unknown';
       const addrs = iface.addrs && iface.addrs.length ? `<div class="iface-addrs">${iface.addrs.join(' &nbsp; ')}</div>` : '';
+      const mcs = (iface.tx_mcs || iface.rx_mcs)
+        ? `<div class="iface-addrs">TX ${iface.tx_mcs || '—'} &nbsp; RX ${iface.rx_mcs || '—'}</div>` : '';
       const faultLines = (iface.faults || []).map(f => `<div class="${iface.health==='fault'?'iface-fault':'iface-warn'}">${f}</div>`).join('');
       return `<div class="iface-row health-${iface.health}">
         <div class="iface-header">
@@ -2469,7 +2565,7 @@ function renderPeerDrawer(d, hostname) {
           ${label ? `<span class="iface-role role-${iface.role}">${label}</span>` : ''}
         </div>
         ${iface.detail ? `<div class="iface-detail">${iface.detail}</div>` : ''}
-        ${addrs}${faultLines}
+        ${addrs}${mcs}${faultLines}
       </div>`;
     }).join('');
   }

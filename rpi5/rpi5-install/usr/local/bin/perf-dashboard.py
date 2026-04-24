@@ -13,6 +13,7 @@ Endpoints:
   POST /api/txpower             - Set TX power on node/interface
   POST /api/measure/start       - Start iperf3/ping session
   GET  /api/measure/status      - Current measurement status
+  GET  /api/upload/status       - Current upload status
   GET  /api/sessions            - List saved sessions
   GET  /api/sessions/<id>       - Get session JSON
   GET  /api/sessions/<id>/csv   - Get session CSV
@@ -65,6 +66,23 @@ _measure_status = {
     'current': None, 'last_result': None,
 }
 
+_upload_lock = threading.Lock()
+_upload_status = {
+    'running': False,
+    'target': '',
+    'phase': '',
+    'progress': '',
+    'bytes_sent': 0,
+    'bytes_total': 0,
+    'percent': 0,
+    'started_at': None,
+    'finished_at': None,
+    'done': False,
+    'error': '',
+    'file': '',
+    'url': '',
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,6 +132,83 @@ def get_local_battery_percentage():
     except Exception:
         pass
     return ''
+
+
+def get_local_uptime():
+    try:
+        with open('/proc/uptime') as f:
+            secs = float(f.read().split()[0])
+        return fmt_uptime(secs)
+    except Exception:
+        return ''
+
+
+def reset_upload_status():
+    with _upload_lock:
+        _upload_status.update({
+            'running': False,
+            'target': '',
+            'phase': '',
+            'progress': '',
+            'bytes_sent': 0,
+            'bytes_total': 0,
+            'percent': 0,
+            'started_at': None,
+            'finished_at': None,
+            'done': False,
+            'error': '',
+            'file': '',
+            'url': '',
+        })
+
+
+def update_upload_status(**kwargs):
+    with _upload_lock:
+        _upload_status.update(kwargs)
+
+
+def start_upload_status(target):
+    now = int(time.time())
+    with _upload_lock:
+        if _upload_status.get('running'):
+            raise RuntimeError('Upload already running')
+        _upload_status.update({
+            'running': True,
+            'target': target,
+            'phase': 'starting',
+            'progress': f'Starting {target} upload...',
+            'bytes_sent': 0,
+            'bytes_total': 0,
+            'percent': 1,
+            'started_at': now,
+            'finished_at': None,
+            'done': False,
+            'error': '',
+            'file': '',
+            'url': '',
+        })
+
+
+def finish_upload_status(ok=True, error='', **extra):
+    now = int(time.time())
+    with _upload_lock:
+        _upload_status.update(extra)
+        _upload_status['running'] = False
+        _upload_status['done'] = bool(ok)
+        _upload_status['error'] = error or ''
+        _upload_status['finished_at'] = now
+        _upload_status['percent'] = 100 if ok else _upload_status.get('percent', 0)
+        if ok:
+            _upload_status['phase'] = 'done'
+            _upload_status['progress'] = _upload_status.get('progress') or 'Upload complete'
+        else:
+            _upload_status['phase'] = 'error'
+            _upload_status['progress'] = error or _upload_status.get('progress') or 'Upload failed'
+
+
+def get_upload_status():
+    with _upload_lock:
+        return dict(_upload_status)
 
 def parse_registry():
     nodes = {}
@@ -349,6 +444,95 @@ def fmt_uptime(seconds):
     d = h // 24
     rh = h % 24
     return f'{d}d{rh:02d}h'
+
+
+def get_session_hop_count(src_ip, dst_ip):
+    if not src_ip or not dst_ip:
+        return None, 'missing'
+    try:
+        data = call_node_api(src_ip, '/api/data', timeout=5)
+    except Exception:
+        return None, 'error'
+    if not isinstance(data, dict):
+        return None, 'error'
+    if data.get('error'):
+        return None, 'error'
+    for node in data.get('nodes', []):
+        if node.get('ip') == dst_ip:
+            hop_count = node.get('hop_count')
+            if isinstance(hop_count, int) and hop_count >= 1:
+                return hop_count, 'batctl'
+            return None, 'unknown'
+    return None, 'unknown'
+
+
+def extract_iperf3_metrics(iperf):
+    metrics = {
+        'tcp_mbps': None,
+        'udp_mbps': None,
+        'jitter_ms': None,
+        'loss_pct': None,
+    }
+    if not isinstance(iperf, dict):
+        return metrics
+
+    end = iperf.get('end', {}) or {}
+
+    def _mbps(section):
+        try:
+            bps = section.get('bits_per_second')
+            if bps is None:
+                return None
+            return round(float(bps) / 1e6, 2)
+        except Exception:
+            return None
+
+    for key in ('sum_received', 'sum_sent', 'sum'):
+        section = end.get(key)
+        if isinstance(section, dict):
+            value = _mbps(section)
+            if value is not None:
+                if key == 'sum':
+                    metrics['udp_mbps'] = value
+                elif metrics['tcp_mbps'] is None:
+                    metrics['tcp_mbps'] = value
+
+    sum_section = end.get('sum')
+    if isinstance(sum_section, dict):
+        try:
+            if sum_section.get('jitter_ms') is not None:
+                metrics['jitter_ms'] = round(float(sum_section.get('jitter_ms')), 3)
+        except Exception:
+            pass
+        try:
+            if sum_section.get('lost_percent') is not None:
+                metrics['loss_pct'] = round(float(sum_section.get('lost_percent')), 2)
+        except Exception:
+            pass
+
+    streams = end.get('streams')
+    if metrics['tcp_mbps'] is None and isinstance(streams, list):
+        received_vals = []
+        sent_vals = []
+        for stream in streams:
+            receiver = stream.get('receiver') if isinstance(stream, dict) else None
+            sender = stream.get('sender') if isinstance(stream, dict) else None
+            if isinstance(receiver, dict) and receiver.get('bits_per_second') is not None:
+                try:
+                    received_vals.append(float(receiver.get('bits_per_second')))
+                except Exception:
+                    pass
+            if isinstance(sender, dict) and sender.get('bits_per_second') is not None:
+                try:
+                    sent_vals.append(float(sender.get('bits_per_second')))
+                except Exception:
+                    pass
+        if received_vals:
+            metrics['tcp_mbps'] = round(sum(received_vals) / 1e6, 2)
+        elif sent_vals:
+            metrics['tcp_mbps'] = round(sum(sent_vals) / 1e6, 2)
+
+    return metrics
 
 def _fmt_dbm(value):
     try:
@@ -695,6 +879,9 @@ def build_topology():
             live_battery = get_local_battery_percentage()
             if live_battery:
                 node_info['battery'] = live_battery
+            live_uptime = get_local_uptime()
+            if live_uptime:
+                node_info['uptime'] = live_uptime
             node_info['interfaces'] = {
                 'wlan0': {'active': 'wlan0' in active_ifaces, **iw_wlan0, **mcs_map['wlan0']},
                 'wlan1': {'active': 'wlan1' in active_ifaces, **iw_wlan1, **mcs_map['wlan1']},
@@ -792,25 +979,16 @@ def session_to_csv(label):
         'timestamp', 'session_label', 'test_type',
         'src_node', 'dst_node',
         'active_interfaces', 'halow_channel', 'halow_bw',
+        'hop_count', 'hop_count_source',
         'tcp_mbps', 'udp_mbps', 'jitter_ms', 'loss_pct',
         'rtt_avg_ms', 'rtt_min_ms', 'rtt_max_ms',
     ])
     for r in results:
         iperf = r.get('iperf3_result', {})
         ping  = r.get('ping_result', {})
-        # Extract iperf3 metrics
-        tcp_mbps = udp_mbps = jitter = loss = None
-        try:
-            end = iperf.get('end', {})
-            if 'sum_received' in end:
-                tcp_mbps = round(end['sum_received']['bits_per_second'] / 1e6, 2)
-            if 'sum' in end:
-                s = end['sum']
-                udp_mbps = round(s.get('bits_per_second', 0) / 1e6, 2)
-                jitter   = round(s.get('jitter_ms', 0), 3)
-                loss     = round(s.get('lost_percent', 0), 2)
-        except Exception:
-            pass
+        metrics = extract_iperf3_metrics(iperf)
+        ping_loss = ping.get('loss_pct', '') if ping else ''
+        loss_value = metrics['loss_pct'] if metrics['loss_pct'] is not None else ping_loss
         writer.writerow([
             r.get('timestamp', ''),
             r.get('session_label', ''),
@@ -820,10 +998,12 @@ def session_to_csv(label):
             ','.join(r.get('active_interfaces', [])),
             r.get('halow_channel', ''),
             r.get('halow_bw', ''),
-            tcp_mbps or '',
-            udp_mbps or '',
-            jitter or '',
-            loss or (ping.get('loss_pct', '') if ping else ''),
+            r.get('hop_count', ''),
+            r.get('hop_count_source', ''),
+            '' if metrics['tcp_mbps'] is None else metrics['tcp_mbps'],
+            '' if metrics['udp_mbps'] is None else metrics['udp_mbps'],
+            '' if metrics['jitter_ms'] is None else metrics['jitter_ms'],
+            loss_value,
             ping.get('rtt_avg', '') if ping else '',
             ping.get('rtt_min', '') if ping else '',
             ping.get('rtt_max', '') if ping else '',
@@ -890,26 +1070,16 @@ def summarize_measurement_result(record):
 
     iperf = record.get('iperf3_result') or {}
     ping = record.get('ping_result') or {}
-    try:
-        end = iperf.get('end', {})
-        if 'sum_received' in end:
-            summary['tcp_mbps'] = round(end['sum_received'].get('bits_per_second', 0) / 1e6, 2)
-        if 'sum_sent' in end and 'tcp_mbps' not in summary:
-            summary['tcp_mbps'] = round(end['sum_sent'].get('bits_per_second', 0) / 1e6, 2)
-        if 'sum' in end:
-            s = end['sum']
-            if s.get('bits_per_second') is not None:
-                summary['udp_mbps'] = round(s.get('bits_per_second', 0) / 1e6, 2)
-            if s.get('jitter_ms') is not None:
-                summary['jitter_ms'] = round(s.get('jitter_ms', 0), 3)
-            if s.get('lost_percent') is not None:
-                summary['loss_pct'] = round(s.get('lost_percent', 0), 2)
-    except Exception:
-        pass
+    metrics = extract_iperf3_metrics(iperf)
+    for key, value in metrics.items():
+        if value is not None:
+            summary[key] = value
 
     for key in ('rtt_avg', 'rtt_min', 'rtt_max', 'loss_pct'):
         if ping.get(key) is not None:
             summary[key] = ping.get(key)
+    if record.get('hop_count') is not None:
+        summary['hop_count'] = record.get('hop_count')
     return summary
 
 def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
@@ -961,7 +1131,12 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     'ch_2g':            topo['ch_2g'],
                     'gps_source':       None,
                     'gps_destination':  None,
+                    'hop_count':        None,
+                    'hop_count_source': '',
                 }
+                hop_count, hop_source = get_session_hop_count(src_ip, dst_ip)
+                result_record['hop_count'] = hop_count
+                result_record['hop_count_source'] = hop_source
 
                 if test_type == 'icmp_ping':
                     # Run ping locally toward dst
@@ -1024,6 +1199,93 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             _measure_status['progress'] = f'Failed after {done} test(s)'
             _measure_status['error']    = str(e)
             _measure_status['done']     = done
+
+
+def run_upload_github_job():
+    repo_dir = '/home/radio/manet-dev'
+    meas_src = SESSIONS_DIR
+    meas_dst = os.path.join(repo_dir, 'measurements')
+    try:
+        update_upload_status(phase='sync', progress='Syncing measurements into repo...', percent=10)
+        subprocess.run(['rsync', '-a', meas_src + '/', meas_dst + '/'],
+                       check=True, timeout=60)
+
+        update_upload_status(phase='git-add', progress='Staging measurement files...', percent=35)
+        subprocess.run(['git', '-C', repo_dir, 'add', 'measurements/'],
+                       check=True, timeout=15)
+
+        update_upload_status(phase='git-commit', progress='Creating git commit...', percent=55)
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M')
+        commit = subprocess.run(['git', '-C', repo_dir, 'commit', '-m',
+                                 f'measurements: add results {ts}'],
+                                capture_output=True, text=True, timeout=15)
+        if commit.returncode != 0:
+            commit_out = (commit.stderr or commit.stdout or '').lower()
+            if 'nothing to commit' not in commit_out:
+                raise subprocess.CalledProcessError(
+                    commit.returncode, commit.args, output=commit.stdout, stderr=commit.stderr
+                )
+
+        update_upload_status(phase='git-push', progress='Pushing measurements to GitHub...', percent=80)
+        subprocess.run(['git', '-C', repo_dir, 'push'],
+                       check=True, timeout=120)
+        finish_upload_status(True, progress='Uploaded measurements to GitHub')
+    except subprocess.CalledProcessError as e:
+        finish_upload_status(False, error=str(e))
+    except Exception as e:
+        finish_upload_status(False, error=str(e))
+
+
+def run_upload_ventum_job():
+    archive = ''
+    try:
+        conf = load_kv_file('/etc/mesh.conf')
+        ventum_url = conf.get('ventum_upload_url', 'https://manet.ventum.hr/upload/rpi5/measurements')
+        ventum_auth = conf.get('ventum_auth', '')
+        if not ventum_auth:
+            user = conf.get('ventum_user', 'clanker')
+            password = conf.get('ventum_password', 'really-strong-password-321')
+            ventum_auth = f'{user}:{password}'
+
+        ts = datetime.now().strftime('%Y%m%dT%H%M%S')
+        host = get_my_hostname()
+        archive = f'/tmp/manet-measurements-{host}-{ts}.tar.gz'
+        remote_name = os.path.basename(archive)
+        upload_url = ventum_url.rstrip('/') + '/' + remote_name
+
+        update_upload_status(phase='pack', progress='Packing measurements archive...', percent=15)
+        subprocess.run(
+            ['tar', '-C', os.path.dirname(SESSIONS_DIR),
+             '-czf', archive, os.path.basename(SESSIONS_DIR)],
+            check=True, timeout=120
+        )
+        total = os.path.getsize(archive) if os.path.exists(archive) else 0
+        update_upload_status(
+            phase='upload',
+            progress='Uploading archive to Ventum...',
+            bytes_total=total,
+            bytes_sent=0,
+            percent=55,
+            file=remote_name,
+            url=upload_url,
+        )
+
+        subprocess.run(
+            ['curl', '-fS', '-u', ventum_auth, '-T', archive, upload_url],
+            check=True, timeout=300
+        )
+        update_upload_status(bytes_sent=total, percent=95)
+        finish_upload_status(True, progress='Uploaded measurements to Ventum', file=remote_name, url=upload_url)
+    except subprocess.CalledProcessError as e:
+        finish_upload_status(False, error=str(e))
+    except Exception as e:
+        finish_upload_status(False, error=str(e))
+    finally:
+        if archive:
+            try:
+                os.remove(archive)
+            except Exception:
+                pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HTML
@@ -1270,6 +1532,12 @@ tr:hover td{background:rgba(236,176,0,.08)}
 .upload-info{flex:1}
 .upload-title{font-size:13px;margin-bottom:2px}
 .upload-sub{font-size:10px;color:var(--muted);letter-spacing:.3px}
+.upload-status{display:none;margin:12px 16px 0;padding:12px;border:1px solid var(--border2);border-radius:8px;background:var(--card)}
+.upload-status-title{font-size:10px;font-weight:800;color:var(--muted);letter-spacing:.4px}
+.upload-status-text{margin-top:6px;font-size:11px;font-weight:700}
+.upload-status-meta{margin-top:4px;font-size:10px;color:var(--muted);line-height:1.4}
+.upload-status-bar{margin-top:8px;height:8px;border-radius:999px;background:var(--border2);overflow:hidden}
+.upload-status-fill{height:100%;width:0;background:var(--accent2);transition:width .18s ease}
 .footer-actions{display:flex;justify-content:flex-end;padding:8px 0 6px}
 .logout-link-btn{border:1px solid rgba(180,35,24,.26);background:rgba(180,35,24,.05);color:#b42318;border-radius:999px;padding:8px 14px;font-family:var(--font);font-size:11px;font-weight:850;cursor:pointer;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease}
 .logout-link-btn:hover{background:#b42318;color:#ffffff;box-shadow:0 8px 20px rgba(180,35,24,.16);transform:translateY(-1px)}
@@ -1678,11 +1946,12 @@ function showTab(name, updateUrl = true) {
 }
 
 // ── Clock ──
-function tickClock() {
+function tickLocalTime() {
   const el = document.getElementById('hdr-clock');
-  if (el) el.textContent = new Date().toLocaleString('hr-HR', {hour12:false}).replace(',','');
+  if (el) el.textContent = new Date().toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
 }
-setInterval(tickClock, 1000); tickClock();
+setInterval(tickLocalTime, 1000);
+tickLocalTime();
 
 // ── Topology tab ──
 function renderTopology() {
@@ -1717,8 +1986,7 @@ function renderTopology() {
   const inet = document.getElementById('hdr-inet');
   if (_topo.internet) { inet.textContent = '● INET OK'; inet.className = 'ok'; }
   else { inet.textContent = '○ NO INET'; inet.className = 'no'; }
-  document.getElementById('upload-github').disabled = !_topo.internet;
-  document.getElementById('upload-ventum').disabled = !_topo.internet;
+  setUploadButtons(false);
 }
 
 // ── Interface control tab ──
@@ -1730,7 +1998,7 @@ function buildIfaceControl() {
     const ifaces = node.interfaces || {};
     const card = document.createElement('div');
     card.className = 'card';
-    const BANDS = {wlan0: '2.4 GHz', wlan1: '5 GHz', wlan2: 'HaLow 900 MHz'};
+    const BANDS = {wlan0: '2.4 GHz', wlan1: '5 GHz', wlan2: 'HaLow'};
     let html = `<div class="card-title">${node.hostname} &nbsp;<span style="color:var(--muted);font-size:10px">${node.ip}${node.is_me ? ' &bull; THIS NODE' : ''}</span></div>`;
     for (const iface of ['wlan0','wlan1','wlan2']) {
       const info = ifaces[iface] || {};
@@ -2087,21 +2355,95 @@ async function deleteSession(encodedLabel) {
 }
 
 async function uploadGithub() {
-  document.getElementById('upload-github').disabled = true;
-  const r = await fetch('/api/upload/github', {method:'POST'});
-  const d = await r.json();
-  document.getElementById('upload-github').disabled = !_topo?.internet;
-  if (d.ok) showMsg('Uploaded to GitHub', 'ok');
-  else showMsg('GitHub upload failed: ' + d.error, 'err');
+  try {
+    const r = await fetch('/api/upload/github', {method:'POST'});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    setUploadButtons(true);
+    setUploadStatus({running:true,target:'github',phase:'starting',progress:'Starting GitHub upload...',percent:1});
+    pollUploadStatus();
+  } catch (e) {
+    setUploadButtons(false);
+    showMsg('GitHub upload failed: ' + e.message, 'err');
+  }
 }
 
 async function uploadVentum() {
-  document.getElementById('upload-ventum').disabled = true;
-  const r = await fetch('/api/upload/ventum', {method:'POST'});
-  const d = await r.json();
-  document.getElementById('upload-ventum').disabled = !_topo?.internet;
-  if (d.ok) showMsg('Uploaded to Ventum', 'ok');
-  else showMsg('Ventum upload failed: ' + d.error, 'err');
+  try {
+    const r = await fetch('/api/upload/ventum', {method:'POST'});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    setUploadButtons(true);
+    setUploadStatus({running:true,target:'ventum',phase:'starting',progress:'Starting Ventum upload...',percent:1});
+    pollUploadStatus();
+  } catch (e) {
+    setUploadButtons(false);
+    showMsg('Ventum upload failed: ' + e.message, 'err');
+  }
+}
+
+let _uploadPollTimer = null;
+
+function setUploadButtons(running) {
+  const githubBtn = document.getElementById('upload-github');
+  const ventumBtn = document.getElementById('upload-ventum');
+  const disabled = running || !_topo?.internet;
+  if (githubBtn) githubBtn.disabled = disabled;
+  if (ventumBtn) ventumBtn.disabled = disabled;
+}
+
+function setUploadStatus(d) {
+  const card = document.getElementById('upload-status');
+  const title = document.getElementById('upload-status-title');
+  const text = document.getElementById('upload-status-text');
+  const meta = document.getElementById('upload-status-meta');
+  const fill = document.getElementById('upload-status-fill');
+  if (!card || !title || !text || !meta || !fill) return;
+
+  if (!d || (!d.running && !d.progress && !d.error && !d.done)) {
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = '';
+  const target = (d.target || 'upload').toUpperCase();
+  const percent = Number.isFinite(Number(d.percent)) ? Math.max(0, Math.min(100, Number(d.percent))) : 0;
+  title.textContent = `${target} STATUS`;
+  text.textContent = d.error ? `Error: ${d.error}` : (d.progress || 'Working...');
+  meta.textContent = [
+    d.phase ? `phase ${d.phase}` : '',
+    percent ? `${percent}%` : '',
+    d.bytes_total ? `${d.bytes_sent || 0}/${d.bytes_total} bytes` : '',
+    d.file ? d.file : ''
+  ].filter(Boolean).join(' · ');
+  fill.style.width = `${percent}%`;
+  fill.style.background = d.error ? 'var(--red)' : (d.done ? 'var(--green)' : 'var(--accent2)');
+}
+
+async function pollUploadStatus() {
+  if (_uploadPollTimer) {
+    clearTimeout(_uploadPollTimer);
+    _uploadPollTimer = null;
+  }
+  try {
+    const r = await fetch('/api/upload/status');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    setUploadStatus(d);
+    setUploadButtons(!!d.running);
+    if (d.running) {
+      _uploadPollTimer = setTimeout(pollUploadStatus, 1000);
+      return;
+    }
+    if (d.done) {
+      showMsg(`${(d.target || 'upload').toUpperCase()} upload complete`, 'ok');
+    } else if (d.error) {
+      showMsg(`${(d.target || 'upload').toUpperCase()} upload failed: ${d.error}`, 'err');
+    }
+  } catch (e) {
+    setUploadButtons(false);
+    showMsg('Upload status failed: ' + e.message, 'err');
+  }
 }
 
 window.onload = async () => {
@@ -2113,6 +2455,7 @@ window.onload = async () => {
   const halowBw = document.getElementById('halow-bw');
   if (halowBw) halowBw.addEventListener('change', () => updateHalowTxpowerOptions());
   startAutoRefresh();
+  pollUploadStatus();
 };
 
 window.addEventListener('hashchange', () => showTab(getInitialTab(), false));
@@ -2196,7 +2539,7 @@ def render_dashboard():
   <!-- ── RADIO CONFIG ── -->
   <div id="tab-radio" class="tab-pane" style="display:none">
     <div class="card">
-      <div class="card-title">HaLow 900 MHz</div>
+      <div class="card-title">HaLow</div>
       <div class="row">
         <span class="row-label">Channel</span>
         <select id="halow-ch">
@@ -2371,6 +2714,12 @@ def render_dashboard():
         </div>
         <button class="btn btn-green" id="upload-ventum" onclick="uploadVentum()" disabled>UPLOAD</button>
       </div>
+      <div id="upload-status" class="upload-status">
+        <div id="upload-status-title" class="upload-status-title">UPLOAD STATUS</div>
+        <div id="upload-status-text" class="upload-status-text">—</div>
+        <div id="upload-status-meta" class="upload-status-meta"></div>
+        <div class="upload-status-bar"><div id="upload-status-fill" class="upload-status-fill"></div></div>
+      </div>
       <div style="padding:12px 16px;font-size:10px;color:var(--muted);letter-spacing:.5px">
         UPLOAD BUTTONS ENABLED ONLY WHEN INTERNET IS AVAILABLE
       </div>
@@ -2470,6 +2819,9 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/measure/status':
             with _measure_lock:
                 self.send_json(dict(_measure_status))
+
+        elif path == '/api/upload/status':
+            self.send_json(get_upload_status())
 
         elif path == '/api/sessions':
             self.send_json(list_sessions())
@@ -2705,59 +3057,19 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/upload/github':
             try:
-                repo_dir = '/home/radio/manet-dev'
-                meas_src = SESSIONS_DIR
-                meas_dst = os.path.join(repo_dir, 'measurements')
-                subprocess.run(['rsync', '-a', meas_src + '/', meas_dst + '/'],
-                               check=True, timeout=30)
-                subprocess.run(['git', '-C', repo_dir, 'add', 'measurements/'],
-                               check=True, timeout=10)
-                ts = datetime.now().strftime('%Y-%m-%d %H:%M')
-                subprocess.run(['git', '-C', repo_dir, 'commit', '-m',
-                                f'measurements: add results {ts}'],
-                               check=True, timeout=10)
-                subprocess.run(['git', '-C', repo_dir, 'push'],
-                               check=True, timeout=30)
-                self.send_json({'ok': True})
-            except subprocess.CalledProcessError as e:
-                self.send_json({'ok': False, 'error': str(e)})
+                start_upload_status('github')
+                t = threading.Thread(target=run_upload_github_job, daemon=True)
+                t.start()
+                self.send_json({'ok': True, 'started': True})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
         elif path == '/api/upload/ventum':
             try:
-                conf = load_kv_file('/etc/mesh.conf')
-                ventum_url = conf.get('ventum_upload_url', 'https://manet.ventum.hr/upload/rpi5/measurements')
-                ventum_auth = conf.get('ventum_auth', '')
-                if not ventum_auth:
-                    user = conf.get('ventum_user', 'clanker')
-                    password = conf.get('ventum_password', 'really-strong-password-321')
-                    ventum_auth = f'{user}:{password}'
-
-                ts = datetime.now().strftime('%Y%m%dT%H%M%S')
-                host = get_my_hostname()
-                archive = f'/tmp/manet-measurements-{host}-{ts}.tar.gz'
-                remote_name = os.path.basename(archive)
-                upload_url = ventum_url.rstrip('/') + '/' + remote_name
-
-                subprocess.run(
-                    ['tar', '-C', os.path.dirname(SESSIONS_DIR),
-                     '-czf', archive, os.path.basename(SESSIONS_DIR)],
-                    check=True, timeout=60
-                )
-                try:
-                    subprocess.run(
-                        ['curl', '-fS', '-u', ventum_auth, '-T', archive, upload_url],
-                        check=True, timeout=120
-                    )
-                finally:
-                    try:
-                        os.remove(archive)
-                    except Exception:
-                        pass
-                self.send_json({'ok': True, 'file': remote_name, 'url': upload_url})
-            except subprocess.CalledProcessError as e:
-                self.send_json({'ok': False, 'error': str(e)})
+                start_upload_status('ventum')
+                t = threading.Thread(target=run_upload_ventum_job, daemon=True)
+                t.start()
+                self.send_json({'ok': True, 'started': True})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
