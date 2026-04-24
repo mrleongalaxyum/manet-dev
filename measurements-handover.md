@@ -10,6 +10,7 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - `perf-dashboard.py` postoji i radi kao Python `http.server` na portu 8081.
 - `perf-dashboard.service`, `perf-http.service` i `/etc/sudoers.d/perf` postoje u RPi5 install treeju.
 - `mesh-status.py` je proširen control endpointima za interface toggle, tx power, HaLow channel, iperf server/client i ping.
+- Ispravan systemd unit za admin panel je `mesh-status.service`; `manet-status.service` ne postoji i ne smije se koristiti u push/deploy skriptama.
 - Basic auth je isključen za admin UI; `/admin` ne smije otvarati browser login prozor. Runtime control endpointi na `mesh-status.py` nisu admin-form endpointi: dostupni su server-to-server pozivima iz `perf-dashboard.py` za localhost/mesh subnet IP-eve.
 - `perf-dashboard.py` CSS ima mobile breakpoint za uske ekrane: header/nav se lome, kartice i forme idu u jednu kolonu, global action buttons u 2 kolone, a tablice dobivaju horizontalni scroll samo unutar tablice.
 - Measurement i radio config akcije daju foreground overlay feedback: start/running/failed/completed za mjerenja te applying/failed/applied za HaLow i Wi-Fi channel promjene.
@@ -38,7 +39,7 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - Header local time tece u realnom vremenu (setInterval, ne zamrznuti server timestamp).
 - CPU load prikazuje se na 2 decimale.
 - `perf.local` header accent strip usklađen s `manet.local` dark yellow gradientom.
-- Sve izmjene mergane na `master`, release `v0.8-perf-dashboard` na GitHubu, tarball na Ventuму i Colorado SFTP.
+- Sve izmjene mergane na `master`, release `v0.9-runtime-dashboard-fixes` na GitHubu, tarball na Ventumu i Colorado SFTP.
 
 ---
 
@@ -59,7 +60,7 @@ SSH: `radio@<ip>`, password: `raspberry`
 |-----------|-------------|----------------|----------------|
 | wlan0     | mt7915e     | 2.4 GHz        | batman-adv (bat0) |
 | wlan1     | mt7915e     | 5 GHz          | batman-adv (bat0) |
-| wlan2     | morse_usb   | 900 MHz HaLow  | batman-adv (bat0) |
+| wlan2     | morse_usb   | HaLow  | batman-adv (bat0) |
 | wlan3     | brcmfmac    | 2.4 GHz AP     | EUD AP (br0, ne u bat0) |
 
 ### Mrežni stack
@@ -260,7 +261,7 @@ timestamp,session_label,test_type,src_node,dst_node,active_interfaces,halow_chan
 - Relevantno za "hibridna arhitektura" analizu
 
 **4. HaLow-only mode**
-- Gase se wlan0 i wlan1, mesh radi samo na HaLow 900 MHz
+- Gase se wlan0 i wlan1, mesh radi samo na HaLow
 - Mjeri HaLow standalone performanse (domet vs propusnost)
 
 **5. Channel width comparison**

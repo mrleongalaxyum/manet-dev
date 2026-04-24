@@ -8,7 +8,7 @@
 |-----------|------------|---------------|----------------|
 | wlan0     | mt7915e    | 2.4 GHz       | batman-adv mesh slave |
 | wlan1     | mt7915e    | 5 GHz         | batman-adv mesh slave |
-| wlan2     | morse_usb  | 900 MHz HaLow | batman-adv mesh slave |
+| wlan2     | morse_usb  | HaLow | batman-adv mesh slave |
 | wlan3     | brcmfmac   | 2.4 GHz       | AP only (EUDs), NOT in bat0 |
 
 batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Each node gets a `/24` chunk of `10.30.2.0/24` via `node-manager.sh` (alfred-based gossip). All 4 nodes currently have ethernet (`end0`) — in normal field deployment only one node has ethernet and becomes the mesh gateway (`batctl gw_mode server`); others route `default via bat0`.
@@ -48,6 +48,7 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
   - `halow_mcs_peer`
 - Despite the field names, the carried values are now compact rate summaries, not just raw MCS numbers. Example: `MCS9 N1 SGI 20M`.
 - Important compatibility note: do not blindly regenerate `NodeInfo_pb2.py` with a newer local `protoc` and deploy it. The node image currently has `python3-protobuf 4.21.12`; generated files that import `google.protobuf.runtime_version` will break both `encoder.py` and `decoder.py` on the nodes.
+- `rpi5/rpi5-install/usr/local/bin/NodeInfo_pb2.py` now carries an explicit guard comment: `# protoc: DO NOT REGENERATE — requires protobuf 4.21.x compatibility on live nodes.`
 
 ---
 
@@ -82,7 +83,7 @@ sftp -i .ssh/colorado-manet-key -P 11238 clanker@www.colorado-governor.com
 
 Tarball releases are published as GitHub Release artifacts:
 - **Latest:** https://github.com/mrleongalaxyum/manet-dev/releases/latest
-- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.8-perf-dashboard
+- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.9-runtime-dashboard-fixes
 
 Also mirrored on Colorado SFTP: `/rpi5/rpi5-install.tar.gz`
 
@@ -148,6 +149,7 @@ ssh -J radio@192.168.1.53 radio@10.30.2.28    # reach mesh-78f3 via mesh-78f7
 After reprovisioning with the current tarball, unit names are:
 - `batman-enslave.service` (NOT `batman-if-setup.service`)
 - `node-manager.service` (NOT `node-manager-static.service`)
+- `mesh-status.service` (NOT `manet-status.service`)
 
 Check with: `systemctl status batman-enslave node-manager`
 
