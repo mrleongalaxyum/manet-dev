@@ -1,1 +1,4 @@
 morse-hostap
+.claude/
+.ssh/
+tests/
