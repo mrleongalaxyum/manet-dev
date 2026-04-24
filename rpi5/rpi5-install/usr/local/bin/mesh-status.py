@@ -1088,7 +1088,7 @@ def assemble_status_data():
                 selected_gw in [norm_mac(m) for m in ndata.get('MAC_ADDRESSES','').split(',') if m.strip()]
             )),
             'uptime':       fmt_uptime(ndata.get('UPTIME_SECONDS', '')),
-            'cpu':          ndata.get('CPU_LOAD_AVERAGE', ''),
+            'cpu':          (f"{float(ndata['CPU_LOAD_AVERAGE']):.2f}" if ndata.get('CPU_LOAD_AVERAGE') else ''),
             'battery':      battery,
             'mumble':       ndata.get('IS_MUMBLE_SERVER', 'false').lower() == 'true',
             'mediamtx':     ndata.get('IS_MEDIAMTX_SERVER', 'false').lower() == 'true',
