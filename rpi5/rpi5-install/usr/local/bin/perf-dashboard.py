@@ -1079,7 +1079,7 @@ body{
 
 /* header */
 #hdr{background:rgba(255,255,255,.94);backdrop-filter:blur(18px);border-bottom:1px solid var(--border2);padding:0 22px;min-height:58px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:100;box-shadow:0 1px 0 rgba(2,0,13,.05);transition:min-height .18s ease,padding .18s ease,gap .18s ease}
-#hdr::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,var(--fer-yellow) 0 18%,var(--accent2) 18% 64%,transparent 64%);pointer-events:none}
+#hdr::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,rgba(236,176,0,.92) 0 36%,rgba(236,176,0,.28) 36% 68%,transparent 68%);pointer-events:none}
 :root[data-theme="dark"] #hdr{background:rgba(18,17,24,.92)}
 .fer-lockup{display:flex;align-items:center;justify-content:flex-start;height:58px;min-width:clamp(104px,18vw,172px);width:clamp(104px,18vw,172px);padding-right:8px;border-right:1px solid var(--border);color:var(--fer-black);overflow:hidden;flex:0 0 auto}
 .fer-logo-img{display:block;width:clamp(104px,18vw,172px);height:48px;max-width:none;object-fit:contain;object-position:left center;filter:none;transition:width .18s ease,height .18s ease,filter .18s ease}
