@@ -13,7 +13,7 @@
 
 batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Each node gets a `/24` chunk of `10.30.2.0/24` via `node-manager.sh` (alfred-based gossip). All 4 nodes currently have ethernet (`end0`) — in normal field deployment only one node has ethernet and becomes the mesh gateway (`batctl gw_mode server`); others route `default via bat0`.
 
-**Current active branch:** `admin-panel-mdns`
+**Current active branch:** `master`
 
 ## 2026-04-22 quick state
 
@@ -82,7 +82,7 @@ sftp -i .ssh/colorado-manet-key -P 11238 clanker@www.colorado-governor.com
 
 Tarball releases are published as GitHub Release artifacts:
 - **Latest:** https://github.com/mrleongalaxyum/manet-dev/releases/latest
-- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.4-admin-panel-mdns
+- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.8-perf-dashboard
 
 Also mirrored on Colorado SFTP: `/rpi5/rpi5-install.tar.gz`
 
@@ -123,7 +123,7 @@ ssh -J radio@192.168.1.53 radio@10.30.2.28    # reach mesh-78f3 via mesh-78f7
 ## Repository and Scripts
 
 - **GitHub:** https://github.com/mrleongalaxyum/manet-dev (private)
-- **Active branch:** `admin-panel-mdns`
+- **Active branch:** `master`
 - `rpi5/rpi5-install/` — install package (all 4 nodes provisioned from this)
 - `rpi5/rpi5-live/78f3/` and `rpi5/rpi5-live/78f7/` — live script snapshots from nodes (taken 2026-04-17, before full reprovision — for reference only)
 - `rpi5/rpi5-install.tar.gz` — built tarball, uploaded to Ventum (`/manet/rpi5/rpi5-install.tar.gz`) and available on Colorado SFTP (`/rpi5/rpi5-install.tar.gz`)

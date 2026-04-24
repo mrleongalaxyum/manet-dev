@@ -28,11 +28,17 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - Provjeriti točnu `morse_cli` runtime sintaksu na fizičkom nodu. Implementacija trenutno pokušava više varijanti, uključujući `morse_cli -i wlan2 channel -j`, `--json` i text output.
 - Ako produkcijski Morse alat koristi drugačiji morsectrl transport call, zamijeniti listu pokušaja u `get_halow_driver_info()`.
 - Nakon deploya potvrditi da `/api/topology` i `/api/data` vraćaju `halow_source: "morse"` za `wlan2`; `halow_source: "config"` znači da driver alat nije vratio parsable runtime podatke.
-- Zamijeniti trenutni direktni interface toggle fan-out s Alfred koordiniranim radio-state workflowom: željeno stanje se prvo propagira kroz mesh, svaki nod ACK-a staging, a tek nakon svih ACK-ova ide koordinirani apply.
-- Gašenje/paljenje wlan interfacea mora se raditi kroz odgovarajući `wpa_supplicant` systemd service. Sam `ip link down` nije dovoljan jer service/watchdog može vratiti interface.
-- Implementirano: `perf-dashboard.py` za `/api/interface/toggle` sada objavljuje radio-state kroz Alfred type `71`, čeka ACK-ove kroz Alfred type `72`, pa objavljuje isti version s `activate_at`. Čvorovi obrađuju pakete kroz `mesh-radio-state.py sync`, koji se poziva iz node-manager petlje.
-- Implementirano: `halow-mcs-summary.py` više nije samo HaLow helper po imenu nego zajednički extractor za `wlan0/wlan1/wlan2`; node-manager ga zove lokalno prije Alfred publisha.
-- Implementirano: `NodeInfo_pb2.py` u install treeju je ručno zadržan kompatibilan s runtimeom na nodovima (`protobuf 4.21.12`). Ako se opet generira novijim `protoc`-om i ostavi `runtime_version` import, encoder/decoder će pasti na živim nodovima.
+
+### Implementirano (2026-04-24)
+- Alfred koordinirani radio-state workflow (type 71/72) je implementiran i verificiran na svim 4 nodovima.
+- `halow-mcs-summary.py` je zajednički extractor za `wlan0/wlan1/wlan2`; node-manager ga zove lokalno prije Alfred publisha.
+- `NodeInfo_pb2.py` u install treeju je ručno zadržan kompatibilan s runtimeom na nodovima (`protobuf 4.21.12`). Ako se opet generira novijim `protoc`-om i ostavi `runtime_version` import, encoder/decoder će pasti na živim nodovima.
+- `uptime_seconds` i `cpu_load_average` sada se ispravno šalju u Alfred payload (čitaju se iz `/proc/uptime` i `/proc/loadavg` u sva tri node-managera).
+- TQ za lokalni (self) node je `None` — batman nema self-TQ; badge se ne prikazuje za THIS NODE.
+- Header local time tece u realnom vremenu (setInterval, ne zamrznuti server timestamp).
+- CPU load prikazuje se na 2 decimale.
+- `perf.local` header accent strip usklađen s `manet.local` dark yellow gradientom.
+- Sve izmjene mergane na `master`, release `v0.8-perf-dashboard` na GitHubu, tarball na Ventuму i Colorado SFTP.
 
 ---
 
