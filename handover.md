@@ -364,3 +364,11 @@ For change history and bug log see [history.md](history.md).
 
 - `perf-dashboard.py` koristi underline-only tabs za aktivni state.
 - Ako se tabovi opet mijenjaju, zadržati žuti FER underline umjesto punog plavog aktivnog taba.
+
+### 2026-04-24 - Uptime, CPU i live clock fix
+
+- Sva tri `node-manager*.sh` nisu prosljeđivala `--uptime-seconds` ni `--cpu-load-average` encoderu — Alfred payload je uvijek imao 0. Dodano čitanje iz `/proc/uptime` i `/proc/loadavg` u ENCODER_ARGS bloku sva tri managera.
+- `perf-dashboard.py`: dodana `fmt_uptime()` i poziva se pri buildu node_info umjesto golog int stringa.
+- `mesh-status.py`: `tq` za lokalni (self) node je postavljen na `None` umjesto `255` (batman ne računa TQ prema sebi); TQ badge u node listi se za THIS NODE uopće ne prikazuje.
+- `mesh-status.py`: header local time (`hdr-time`) sada tece svake sekunde kroz `setInterval(tickLocalTime, 1000)` umjesto da stoji na zamrznutom server timestampu.
+- Live patch deploy na sve 4 nodova kroz mesh-f86f (192.168.1.51) kao jump host.
