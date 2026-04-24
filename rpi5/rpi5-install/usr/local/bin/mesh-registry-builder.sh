@@ -97,6 +97,13 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
             printf "%s_LAST_TOURGUIDE_RADIO='%s'\n" "$PREFIX" "${LAST_TOURGUIDE_RADIO:-}"
             printf "%s_NODE_STATE='%s'\n" "$PREFIX" "${NODE_STATE:-ACTIVE}"
             printf "%s_CONFIG_ACK_VERSION='%s'\n" "$PREFIX" "${CONFIG_ACK_VERSION:-}"
+            printf "%s_HALOW_TX_MCS='%s'\n" "$PREFIX" "${HALOW_TX_MCS:-}"
+            printf "%s_HALOW_RX_MCS='%s'\n" "$PREFIX" "${HALOW_RX_MCS:-}"
+            printf "%s_HALOW_MCS_PEER='%s'\n" "$PREFIX" "${HALOW_MCS_PEER:-}"
+            printf "%s_WIFI_24_TX_MCS='%s'\n" "$PREFIX" "${WIFI_24_TX_MCS:-}"
+            printf "%s_WIFI_24_RX_MCS='%s'\n" "$PREFIX" "${WIFI_24_RX_MCS:-}"
+            printf "%s_WIFI_5_TX_MCS='%s'\n" "$PREFIX" "${WIFI_5_TX_MCS:-}"
+            printf "%s_WIFI_5_RX_MCS='%s'\n" "$PREFIX" "${WIFI_5_RX_MCS:-}"
             echo ""
         } >> "$REGISTRY_TMP"
 
@@ -113,7 +120,8 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
         DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 CHANNEL_REPORT_JSON \
         LAST_SEEN_TIMESTAMP IS_IN_LIMP_MODE \
         LAST_TOURGUIDE_TIMESTAMP LAST_TOURGUIDE_RADIO NODE_STATE \
-        CONFIG_ACK_VERSION \
+        CONFIG_ACK_VERSION HALOW_TX_MCS HALOW_RX_MCS HALOW_MCS_PEER \
+        WIFI_24_TX_MCS WIFI_24_RX_MCS WIFI_5_TX_MCS WIFI_5_RX_MCS \
         GPS_LATITUDE GPS_LONGITUDE GPS_ALTITUDE ATAK_USER
 done
 

@@ -30,6 +30,8 @@ IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
+RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
+HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
@@ -104,6 +106,30 @@ get_current_freq() {
     grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
 }
 
+radio_iface_enabled() {
+    python3 - "$1" <<'PY'
+import json, sys
+iface = sys.argv[1]
+try:
+    with open('/var/lib/mesh_radio_state.json') as f:
+        state = json.load(f).get('desired', {}).get(iface, 'up')
+except Exception:
+    state = 'up'
+sys.exit(1 if state == 'down' else 0)
+PY
+}
+
+collect_radio_mcs() {
+    WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
+    WLAN1_TX_MCS=""; WLAN1_RX_MCS=""
+    WLAN2_TX_MCS=""; WLAN2_RX_MCS=""
+    [ -x "$HALOW_MCS_SUMMARY" ] || return 0
+    for iface in wlan0 wlan1 wlan2; do
+        [ -d "/sys/class/net/$iface" ] || continue
+        eval "$("$HALOW_MCS_SUMMARY" --iface "$iface" --shell 2>/dev/null || true)"
+    done
+}
+
 load_mesh_wpa_confs() {
     local mesh_ifaces=()
 
@@ -144,8 +170,8 @@ ensure_static_channels() {
     
     if [ "$needs_restart" = true ]; then
         log "Restarting wpa_supplicant services..."
-        systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
-        systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
+        radio_iface_enabled "$WPA_IFACE_2_4" && systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
+        radio_iface_enabled "$WPA_IFACE_5_0" && systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
         sleep 5
     fi
 }
@@ -174,6 +200,29 @@ is_hosting_service() {
     return 1
 }
 
+is_hosting_mumble_service() {
+    if systemctl is-active --quiet mumble-server.service; then
+        if [ -f /etc/mesh.conf ]; then
+            while IFS='=' read -r key value; do
+                [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+                case "$key" in
+                    ipv4_network)
+                        IPV4_NETWORK="$value"
+                        ;;
+                esac
+            done < /etc/mesh.conf
+        fi
+
+        local CALC_OUTPUT
+        CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+        local FIRST_IP
+        FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
+        ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/" && return 0
+    fi
+    return 1
+}
+
 # === MAIN SETUP ===
 log "Starting Mesh Node Manager (Static Channel Mode)."
 log "Static channels: 2.4G=${STATIC_FREQ_2_4}, 5G=${STATIC_FREQ_5_0}"
@@ -186,6 +235,11 @@ ensure_static_channels
 # === MAIN LOOP ===
 while true; do
     NOW=$(date +%s)
+
+    # === ALFRED RADIO STATE SYNC ===
+    # Global radio up/down changes are staged through Alfred and only applied
+    # after all nodes have ACKed the same version.
+    [ -x "$RADIO_STATE_SYNC" ] && "$RADIO_STATE_SYNC" sync || true
 
     # Load current chunk assignment from IP manager
     MY_CHUNK=0
@@ -217,6 +271,7 @@ while true; do
         IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
         IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
         IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
+        IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
         
         # Gather MACs
         ALL_MACS=("$MY_MAC")
@@ -229,6 +284,7 @@ while true; do
         done
         
         CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+        collect_radio_mcs
         
         # Encode (no scan data, no limp mode, no tourguide in static mode)
         ENCODER_ARGS=(
@@ -240,12 +296,26 @@ while true; do
             "--timestamp" "$NOW"
             "--data-channel-2-4" "$STATIC_FREQ_2_4"
             "--data-channel-5-0" "$STATIC_FREQ_5_0"
+            "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
+            "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
+            "--wifi-5-tx-mcs" "${WLAN1_TX_MCS:-}"
+            "--wifi-5-rx-mcs" "${WLAN1_RX_MCS:-}"
+            "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
+            "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
+            "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
         )
         [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
         [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
         [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
         [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
-        
+        [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
+        BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));print(d['percentage'])" 2>/dev/null)
+        [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
+        UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+        [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
+        CPU_LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+        [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
+
         CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
         
         if [ -n "$CURRENT_PAYLOAD" ]; then

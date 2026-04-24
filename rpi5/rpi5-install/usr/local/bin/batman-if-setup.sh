@@ -54,6 +54,19 @@ is_nonmesh_wifi() {
     [[ "$(iface_driver "$1")" == brcmfmac ]]
 }
 
+radio_iface_enabled() {
+    python3 - "$1" <<'PY'
+import json, sys
+iface = sys.argv[1]
+try:
+    with open('/var/lib/mesh_radio_state.json') as f:
+        state = json.load(f).get('desired', {}).get(iface, 'up')
+except Exception:
+    state = 'up'
+sys.exit(1 if state == 'down' else 0)
+PY
+}
+
 refresh_interfaces() {
     STANDARD_MESH_INTERFACES=""
     HALOW_INTERFACES=""
@@ -122,6 +135,12 @@ start() {
     # Starting the services here makes batman-if-setup.sh self-sufficient.
     # -------------------------------------------------------------------------
     for WLAN in $STANDARD_MESH_INTERFACES; do
+        if ! radio_iface_enabled "$WLAN"; then
+            echo "Skipping wpa_supplicant for $WLAN (radio-state says down)"
+            systemctl stop "wpa_supplicant@${WLAN}.service" 2>/dev/null || true
+            ip link set "$WLAN" down 2>/dev/null || true
+            continue
+        fi
         if ! systemctl is-active "wpa_supplicant@${WLAN}.service" >/dev/null 2>&1; then
             echo "Starting wpa_supplicant for $WLAN..."
             systemctl start "wpa_supplicant@${WLAN}.service" 2>/dev/null || \
@@ -130,6 +149,12 @@ start() {
     done
     for WLAN in $HALOW_INTERFACES; do
         local svc="wpa_supplicant-s1g-${WLAN}.service"
+        if ! radio_iface_enabled "$WLAN"; then
+            echo "Skipping $svc for $WLAN (radio-state says down)"
+            systemctl stop "$svc" 2>/dev/null || true
+            ip link set "$WLAN" down 2>/dev/null || true
+            continue
+        fi
         if ! systemctl is-active "$svc" >/dev/null 2>&1; then
             echo "Starting wpa_supplicant_s1g for $WLAN..."
             systemctl start "$svc" 2>/dev/null || \
@@ -186,6 +211,12 @@ start() {
     # exist and let batctl's retry loop decide whether the interface is usable.
     # -------------------------------------------------------------------------
     for WLAN in $HALOW_INTERFACES; do
+        if ! radio_iface_enabled "$WLAN"; then
+            echo "--> Skipping HaLow interface: $WLAN (radio-state says down)"
+            systemctl stop "wpa_supplicant-s1g-${WLAN}.service" 2>/dev/null || true
+            ip link set "$WLAN" down 2>/dev/null || true
+            continue
+        fi
         echo "--> Configuring HaLow interface: $WLAN (primary)"
 
         echo "Waiting for $WLAN netdev (managed by wpa_supplicant_s1g)..."
@@ -233,6 +264,12 @@ start() {
     # Standard 802.11 mesh interfaces
     # -------------------------------------------------------------------------
     for WLAN in $STANDARD_MESH_INTERFACES; do
+        if ! radio_iface_enabled "$WLAN"; then
+            echo "--> Skipping standard mesh interface: $WLAN (radio-state says down)"
+            systemctl stop "wpa_supplicant@${WLAN}.service" 2>/dev/null || true
+            ip link set "$WLAN" down 2>/dev/null || true
+            continue
+        fi
         echo "--> Configuring standard mesh interface: $WLAN"
 
         echo "Waiting for $WLAN to be in mesh point mode (managed by wpa_supplicant)..."

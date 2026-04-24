@@ -15,6 +15,40 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 
 **Current active branch:** `admin-panel-mdns`
 
+## 2026-04-22 quick state
+
+- `perf.local` now gets radio link summaries through Alfred gossip instead of direct cross-mesh polling.
+- `manet.local` and `perf.local` were partially re-skinned to align with the FER brandbook:
+  - shared FER token set for light/dark themes
+  - `Roobert, Arial, sans-serif`
+  - inline monochrome FER SVG mark embedded in both GUIs, no external image fetch
+  - self/info states use FER deep blue, gateway/warn emphasis uses FER yellow
+  - `manet.local` keeps a restrained FER-style yellow/blue glow in the topology area
+- `manet.local` now exposes a `PERF.LOCAL` handoff button tied to the provisioned `admin_password`.
+  - validation endpoint on `manet.local`: `POST /api/perf-auth`
+  - persistent `perf.local` cookie: `manet_perf_auth`
+  - direct unauthenticated visits to `perf.local` now show a small password page before proxying to the dashboard
+- The `MANAGE` button on `manet.local` now redirects directly to `perf.local` with no intermediate prompt; auth happens only on the `perf.local` page.
+- The `perf.local` password card was re-centered for mobile/small viewport rendering.
+- `manet.local` mobile interaction was reworked:
+  - one-finger touch no longer pans the topology canvas
+  - whole-page scrolling is restored
+  - topology keeps tap-to-select and two-finger pinch zoom
+  - non-simulation redraws are now `requestAnimationFrame`-queued to reduce mobile stutter
+  - layout uses a less rigid split-panel structure with fewer nested scroll containers
+- HaLow GUI TX-power selection is now bandwidth-aware using a live-tested cap table:
+  - `1 MHz -> 24 dBm`
+  - `2 MHz -> 24 dBm`
+  - `4 MHz -> 22 dBm`
+  The dropdown clamps down when narrowing allowed power and re-exposes higher valid values when switching back.
+- Current protobuf status payload includes compact per-interface TX/RX summaries for all mesh radios:
+  - `wifi_24_tx_mcs`, `wifi_24_rx_mcs`
+  - `wifi_5_tx_mcs`, `wifi_5_rx_mcs`
+  - `halow_tx_mcs`, `halow_rx_mcs`
+  - `halow_mcs_peer`
+- Despite the field names, the carried values are now compact rate summaries, not just raw MCS numbers. Example: `MCS9 N1 SGI 20M`.
+- Important compatibility note: do not blindly regenerate `NodeInfo_pb2.py` with a newer local `protoc` and deploy it. The node image currently has `python3-protobuf 4.21.12`; generated files that import `google.protobuf.runtime_version` will break both `encoder.py` and `decoder.py` on the nodes.
+
 ---
 
 ## Colorado SFTP Server
@@ -148,7 +182,7 @@ EUD clients connected to the node's AP can open `http://manet.local` to reach th
 - **Peer proxy fetch:** `/api/peer/<ip>` endpoint fetches `/api/local` from a peer node on port 80 and returns JSON. Used by the UI to show remote node details.
 - **Drawer — always visible:** Top of side panel always shows a node detail drawer. Default: local node ("★ THIS NODE"). Click neighbor on canvas or in list → shows that neighbor (fetched via proxy). Click central node → returns to local. Clicking any node auto-scrolls side panel to top.
 - **Canvas highlight:** Selected node gets white border + large bright glow. Local node is highlighted by default (while no neighbor is selected).
-- **THIS NODE badge:** Local node highlighted with purple "THIS NODE" badge in the node list.
+- **THIS NODE badge:** Local node highlighted with FER deep-blue "THIS NODE" badge in the node list.
 - **Drag handle**: visible pill between topology canvas and info panel on mobile (≤768px). Drag up to expand info panel to full screen.
 - **Pinch-to-zoom**: canvas supports pinch zoom (0.3×–5×) and pan.
 - **EUD AP health**: `/var/lib/no_mesh_if` is read at runtime to exclude AP interfaces from bat0/wpa_supplicant checks.
@@ -188,3 +222,153 @@ Building from the parent directory creates a prefix folder and scripts end up at
 4. Run `/usr/local/bin/radio-setup.sh` (or reboot if firstrun service is enabled)
 
 For change history and bug log see [history.md](history.md).
+
+### 2026-04-22 - FER logo asset
+
+- Kanonski lokalni logo file je `/usr/local/share/manet/fer-logo.svg`.
+- Taj file mora biti sinkan sa službenim FER SVG assetom s `https://www.fer.unizg.hr/_pub/themes_static/fer_2025/default/img/FERlogo.svg`.
+- `mesh-status.py` i `perf-dashboard.py` serviraju isti lokalni asset preko `/assets/fer-logo.svg`; ne treba vraćati inline/generirani logo osim ako korisnik to izričito ne traži.
+
+### 2026-04-22 - PERF navigation
+
+- `perf-dashboard.py` header ima `OVERVIEW` gumb koji redirecta na `http://manet.local/`.
+- Ako se header dalje mijenja, zadržati `OVERVIEW` i theme toggle u desnom actions bloku.
+
+### 2026-04-22 - THIS NODE badge
+
+- `mesh-status.py` koristi `.self-node-badge` za lokalni node u listi i detail headeru.
+- Ne vraćati zvjezdicu uz `THIS NODE`; badge treba ostati suzdržan i u FER color schemi.
+
+### 2026-04-22 - Touch behavior
+
+- `mesh-status.py` topo canvas na touch uređajima više ne obrađuje single-finger tap selection.
+- Jedan prst je rezerviran za page scroll; canvas touch interakcija ostaje samo za two-finger pinch zoom.
+
+### 2026-04-22 - PERF logout flow
+
+- `perf-dashboard.py` rendera `LOGOUT` gumb na dnu stranice.
+- `mesh-status.py` obrađuje `/auth/perf-logout`, briše `manet_perf_auth` cookie i redirecta na `/auth/perf-login`.
+
+### 2026-04-22 - FER logo theming
+
+- Header lockup na `mesh-status.py` i `perf-dashboard.py` koristi veći FER logo nego prije.
+- U light temi logo ostaje crn, a u dark temi se prikazuje bijelo.
+- `render_perf_auth_page()` koristi veliki logo i `prefers-color-scheme` dark/light stilove.
+
+### 2026-04-22 - PERF login sizing
+
+- `render_perf_auth_page()` input i submit button koriste puni raspoloživi prostor bez overflowa.
+- Ako se login layout dalje dira, zadržati `box-sizing: border-box` na form controls.
+
+### 2026-04-22 - Theme handoff
+
+- `mesh-status.py` i `perf-dashboard.py` čitaju `?theme=light|dark` i spremaju ga u isti `manetUiTheme` key za svoj origin.
+- `MANAGE` i `OVERVIEW` redirecti prenose trenutni theme da login i drugi dashboard ostanu vizualno usklađeni.
+
+### 2026-04-22 - Login CTA and logo block
+
+- `render_perf_auth_page()` nema više accent pozadinu u `.top` bloku.
+- Login CTA koristi FER žutu, ne plavu.
+- Dashboard lockup prikazuje samo FER mark crop službenog SVG asseta.
+
+### 2026-04-22 - Inline node detail
+
+- `mesh-status.py` uklanja gornji `peer-drawer` i detalje rendera inline unutar selektiranog node reda.
+
+### 2026-04-22 - Canvas click behavior
+
+- Canvas click na `mesh-status.py` samo selektira node i skrola listu do njegovog inline detaila.
+- Uklonjen je stari dupli canvas click handler koji je radio dodatni selection flow.
+
+### 2026-04-22 - Header rows
+
+- `mesh-status.py` koristi troredni header: brand row, meta row, action row.
+- `perf-dashboard.py` lockup više ne cropa FER logo; širina je vraćena tako da stane puni logo.
+
+### 2026-04-22 - Compact node toggles
+
+- `mesh-status.py` opet prikazuje topo canvas iznad node liste.
+- Selektirani node detail se otvara i zatvara ponovnim klikom na isti compact row.
+
+### 2026-04-22 - Canvas tooltip
+
+- `mesh-status.py` više ne koristi `#tooltip` floating info box nad canvasom.
+- Ostaju samo hover cursor/highlight i click selection prema listi.
+
+### 2026-04-22 - FER local variants
+
+- Runtime asseti su `/usr/local/share/manet/fer-logo-black.svg` i `/usr/local/share/manet/fer-logo-white.svg`.
+- `mesh-status.py` i `perf-dashboard.py` theme switching direktno mijenja `src` između crne i bijele sign-only varijante.
+
+### 2026-04-23 - Full logo on login
+
+- `render_perf_auth_page()` opet koristi puni `/assets/fer-logo.svg`.
+- Dashboard lockup na `mesh-status.py` i `perf-dashboard.py` skalira se na oko 25% širine ekrana kroz `clamp()`.
+
+### 2026-04-23 - Yellow CTA pass
+
+- `mesh-status.py` koristi puni FER yellow stil za `MANAGE`, a `perf-dashboard.py` isti tretman za `OVERVIEW`.
+- `render_perf_auth_page()` prikazuje `Login` labelu i ima autofill-triggered submit fallbacke za browser password managers.
+- Header FER logo na oba dashboarda dodatno je povećan (`30vw` desktop, jači mobile clamp) radi boljeg vizualnog balansa.
+
+### 2026-04-23 - Header polish follow-up
+
+- `updateHealthHeader()` više ne stavlja dodatnu `●` u `ALL OK` label jer je status dot već zaseban element.
+- FER lockup na `manet.local` i `perf.local` dignut je na `38vw` desktop clamp, uz veći mobile clamp.
+- `perf-dashboard.py` compact header čuva veći FER logo umjesto starog `88px` shrinka.
+
+### 2026-04-23 - Remembered perf login
+
+- `render_perf_auth_page()` koristi skriveni `username=admin` field s `autocomplete="username"` uz `current-password` kako bi browser password managers pravilnije zapamtili login.
+- `PERF_AUTH_COOKIE_MAX_AGE` postavljen je na 180 dana za dulje zadržavanje `manet_perf_auth` cookieja.
+
+### 2026-04-23 - MANAGE redirect
+
+- `goPerfDashboard()` sada otvara `http://perf.local/?theme=...` umjesto izravnog `/auth/perf-login` URL-a.
+- Time `MANAGE` koristi postojeći auth cookie i ne baca korisnika nepotrebno na login page.
+
+### 2026-04-23 - Header logo/title spacing
+
+- `mesh-status.py` i `perf-dashboard.py` imaju manji razmak između FER lockupa i `MANET//...` naslova.
+- Na oba GUI-ja smanjen je i `padding-right` unutar `.fer-lockup` bloka kako bi naslov sjedio bliže logotipu.
+
+### 2026-04-23 - Narrower FER lockup box
+
+- Dodatni follow-up sužava `.fer-lockup` clamp na oba dashboarda jer je ranije preširok logo box ostavljao vidljiv prazan prostor.
+- Lockup sada ostaje velik, ali više ne gura `MANET//STAT` i `MANET//PERF` predaleko udesno.
+
+### 2026-04-23 - mDNS aliases for services
+
+- Live nodovi imaju `avahi-daemon` s `allow-interfaces=br0` i `enable-reflector=no`, pa mDNS ostaje lokalni na EUD AP segmentu.
+- Dodan je `mesh-mdns-update.sh` + systemd timer koji iz `/var/run/mesh_node_registry` odlučuje jesu li `mumble` i `mediamtx` aktivni, a zatim objavljuje njihove stabilne service VIP adrese kroz `/etc/avahi/hosts`.
+- `mesh-ip-manager.sh` više ne piše ručno samo `manet.local` i `perf.local`, nego poziva isti helper kako bi svi lokalni aliases ostali konzistentni.
+
+### 2026-04-23 - Mumble registry repair
+
+- Live dijagnostika je pokazala da `mumble-election.sh` uredno starta iz `node-manager` petlje, ali pada s `ERROR: 'sqlite3' command not found`.
+- `radio-setup.sh` je proširen da instalira `sqlite3` za buduće reprovisioning-e.
+- `node-manager.sh`, `node-manager-static.sh` i `node-manager-acs.sh` sada publishe Mumble service flag na isti način kao MediaMTX, ali samo kad lokalni node stvarno drži Mumble VIP (`HostMin + 2`).
+
+### 2026-04-23 - Dedicated mDNS publisher
+
+- `avahi/hosts` se pokazao nedovoljnim za pouzdano `.local` hostname resolution na mobitelu.
+- Dodan je `mesh-mdns-publisher.py` + `mesh-mdns-publisher.service` koji preko `python3-zeroconf` eksplicitno objavljuje `mumble.local` i `mtx.local` samo na `br0`.
+- `mesh-mdns-update.sh` ostaje zadužen samo za `manet.local` i `perf.local`.
+
+### 2026-04-22 - MANET palette cleanup
+
+- `mesh-status.py` dashboard pass uklanja plave tematske akcente s glavnog `manet.local` UI-ja.
+- Preferirati neutralne tonove i FER žutu za badgeve, service chipove, `THIS NODE` i topo naglaske.
+
+### 2026-04-22 - PERF tabs
+
+- `perf-dashboard.py` koristi underline-only tabs za aktivni state.
+- Ako se tabovi opet mijenjaju, zadržati žuti FER underline umjesto punog plavog aktivnog taba.
+
+### 2026-04-24 - Uptime, CPU i live clock fix
+
+- Sva tri `node-manager*.sh` nisu prosljeđivala `--uptime-seconds` ni `--cpu-load-average` encoderu — Alfred payload je uvijek imao 0. Dodano čitanje iz `/proc/uptime` i `/proc/loadavg` u ENCODER_ARGS bloku sva tri managera.
+- `perf-dashboard.py`: dodana `fmt_uptime()` i poziva se pri buildu node_info umjesto golog int stringa.
+- `mesh-status.py`: `tq` za lokalni (self) node je postavljen na `None` umjesto `255` (batman ne računa TQ prema sebi); TQ badge u node listi se za THIS NODE uopće ne prikazuje.
+- `mesh-status.py`: header local time (`hdr-time`) sada tece svake sekunde kroz `setInterval(tickLocalTime, 1000)` umjesto da stoji na zamrznutom server timestampu.
+- Live patch deploy na sve 4 nodova kroz mesh-f86f (192.168.1.51) kao jump host.
