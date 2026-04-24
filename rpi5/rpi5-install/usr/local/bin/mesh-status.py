@@ -1713,6 +1713,13 @@ function tqPct(tq) {
   if (tq == null) return 0;
   return Math.round((tq / 255) * 100);
 }
+function fmtAge(ts) {
+  const secs = Math.floor(Date.now() / 1000) - parseInt(ts || 0);
+  if (secs < 60)   return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
+  return `${Math.floor(secs/86400)}d ago`;
+}
 function themeColor(light, dark) {
   return isDarkTheme() ? dark : light;
 }
@@ -1751,17 +1758,19 @@ function renderNodeList(nodes) {
     const thisNodeLabel = n.is_me
       ? `<span class="self-node-badge">THIS NODE</span>`
       : '';
-    const tqBadge = n.is_me ? '' : `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
-    const bar = `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
-    const meta = n.uptime  ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
-    const cpu  = n.cpu     ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
+    const nodeStale = !n.is_me && (Date.now() / 1000) - parseInt(n.last_seen || 0) > 300;
+    const tqBadge = (n.is_me || nodeStale) ? '' : `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
+    const bar = nodeStale ? '' : `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
+    const meta = (!nodeStale && n.uptime) ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
+    const cpu  = (!nodeStale && n.cpu)    ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
     let battMeta = '';
-    if (n.battery != null) {
+    if (!nodeStale && n.battery != null) {
       const pct = n.battery.percentage;
       const col = battColor(pct);
       const icon = (n.battery.charging === true) ? '⚡' : (pct <= 15 ? '⚠' : '');
       battMeta = `<span style="color:${col};font-size:10px">${icon}${pct}%</span>`;
     }
+    const offlineBadge = nodeStale ? `<span class="badge badge-tq-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
 
     const expanded = SELECTED_PEER_ID === n.id;
       const detailBody = n.is_me
@@ -1779,9 +1788,9 @@ function renderNodeList(nodes) {
 
     return `<div class="${cls}" data-id="${n.id}">
       <div class="node-summary">
-        <div class="node-name">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
+        <div class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
         <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
-        <div class="node-meta">${tqBadge}${badges.join('')}${meta}${cpu}${battMeta}</div>
+        <div class="node-meta">${nodeStale ? offlineBadge : tqBadge+badges.join('')+meta+cpu+battMeta}</div>
         ${bar}
       </div>
       ${detail}
@@ -2079,7 +2088,8 @@ function drawTopo() {
   SIM.nodes.forEach(n => {
     const isHover = HOVER_NODE && HOVER_NODE.id === n.id;
     const isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID && SELECTED_PEER_ID === n.id);
-    const col = n.is_me ? '#ecb000' : (n.is_gateway ? '#ecb000' : tqColor(n.tq));
+    const nodeStaleCanvas = !n.is_me && (Date.now() / 1000) - parseInt(n.last_seen || 0) > 300;
+    const col = n.is_me ? '#ecb000' : (nodeStaleCanvas ? '#6b7280' : (n.is_gateway ? '#ecb000' : tqColor(n.tq)));
     const r = n.r + (isHover ? 3 : (isSelected ? 2 : 0));
 
     // Soft focus halo for selected node
