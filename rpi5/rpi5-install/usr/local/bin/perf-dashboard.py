@@ -332,6 +332,24 @@ def call_node_api(node_ip, path, method='GET', data=None, timeout=8):
     except Exception as e:
         return {'ok': False, 'error': str(e)}
 
+def fmt_uptime(seconds):
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return ''
+    if s < 60:
+        return f'{s}s'
+    m = s // 60
+    if m < 60:
+        return f'{m}m'
+    h = m // 60
+    rm = m % 60
+    if h < 24:
+        return f'{h}h{rm:02d}m'
+    d = h // 24
+    rh = h % 24
+    return f'{d}d{rh:02d}h'
+
 def _fmt_dbm(value):
     try:
         num = float(value)
@@ -670,7 +688,7 @@ def build_topology():
             'is_me':    is_me,
             'is_gateway': nd.get('IS_GATEWAY', 'false').lower() == 'true',
             'battery':  nd.get('BATTERY_PERCENTAGE', ''),
-            'uptime':   nd.get('UPTIME_SECONDS', ''),
+            'uptime':   fmt_uptime(nd.get('UPTIME_SECONDS', '')),
         }
 
         if is_me:

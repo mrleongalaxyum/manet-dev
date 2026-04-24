@@ -1059,7 +1059,7 @@ def assemble_status_data():
 
         is_me = (my_mac and node_mac == my_mac) or (hostname == my_host)
         if is_me:
-            tq = 255
+            tq = None
             self_found = True
 
         battery = {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None
@@ -1107,7 +1107,7 @@ def assemble_status_data():
             'hostname': my_host,
             'mac': my_mac or '',
             'ip': (state.get('CURRENT_IPV4') or ''),
-            'tq': 255, 'is_me': True, 'is_direct': True,
+            'tq': None, 'is_me': True, 'is_direct': True,
             'is_gateway': False, 'is_selected_gw': False,
             'uptime': '', 'cpu': '', 'battery': None,
             'mumble': False, 'mediamtx': False, 'ntp': False,
@@ -1655,7 +1655,7 @@ function renderNodeList(nodes) {
     const thisNodeLabel = n.is_me
       ? `<span class="self-node-badge">THIS NODE</span>`
       : '';
-    const tqBadge = `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
+    const tqBadge = n.is_me ? '' : `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
     const bar = `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
     const meta = n.uptime  ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
     const cpu  = n.cpu     ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
@@ -1693,12 +1693,19 @@ function renderNodeList(nodes) {
   }).join('');
 }
 
+function tickLocalTime() {
+  const el = document.getElementById('hdr-time');
+  if (el) el.textContent = new Date().toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+}
+setInterval(tickLocalTime, 1000);
+tickLocalTime();
+
 function updateHeader(d) {
   document.getElementById('hdr-hostname').textContent = d.my_hostname || '—';
   document.getElementById('hdr-ip').textContent       = d.my_ip      || '—';
   document.getElementById('hdr-ssid').textContent     = d.mesh_ssid  ? `▶ ${d.mesh_ssid}` : '';
   document.getElementById('hdr-nodes').textContent    = `${d.nodes.length} node${d.nodes.length!==1?'s':''}`;
-  document.getElementById('hdr-time').textContent     = ts(d.timestamp);
+  // hdr-time is kept live by tickLocalTime(), no need to override here
 
   // Gateway label: show selected gateway hostname if known, else count, else "No GW"
   const gwEl = document.getElementById('hdr-gw-label');
