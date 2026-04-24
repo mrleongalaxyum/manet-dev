@@ -7,7 +7,7 @@ Serves mesh network status and topology information on port 8080.
 Access:
   /          - Public status page (localhost + mesh subnet)
   /api/data  - JSON data endpoint (same access control)
-  /admin     - Admin config page (HTTP Basic Auth with admin_password)
+  /admin     - Admin config page (no Basic auth)
 
 Reads:
   /etc/mesh.conf                - Node configuration
@@ -27,11 +27,14 @@ import subprocess
 import re
 import os
 import ipaddress
-import base64
 import socket
 import threading
 import time
-from urllib.parse import urlparse, parse_qs
+import urllib.request
+import hashlib
+import hmac
+import html
+from urllib.parse import urlparse, parse_qs, quote
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -41,6 +44,23 @@ MESH_CONF_FILE  = "/etc/mesh.conf"
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
+HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500, 868500]
+HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
+PERF_AUTH_COOKIE = 'manet_perf_auth'
+PERF_AUTH_COOKIE_MAX_AGE = 15552000
+FER_LOGO_FULL_FILE = '/usr/local/share/manet/fer-logo.svg'
+FER_LOGO_BLACK_FILE = '/usr/local/share/manet/fer-logo-black.svg'
+FER_LOGO_WHITE_FILE = '/usr/local/share/manet/fer-logo-white.svg'
+CONTROL_POST_PATHS = {
+    '/api/control/interface',
+    '/api/control/txpower',
+    '/api/control/halow_channel',
+    '/api/control/wifi_channel',
+    '/api/iperf/server/start',
+    '/api/iperf/server/stop',
+    '/api/iperf/client/run',
+    '/api/ping/run',
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config / State Loaders
@@ -60,6 +80,319 @@ def load_kv_file(path):
     except Exception:
         pass
     return conf
+
+def _machine_token_salt():
+    for path in ('/etc/machine-id', '/var/lib/dbus/machine-id'):
+        try:
+            with open(path) as f:
+                value = f.read().strip()
+            if value:
+                return value
+        except Exception:
+            pass
+    return socket.gethostname()
+
+def get_provisioned_manage_password(conf=None):
+    conf = conf or load_kv_file(MESH_CONF_FILE)
+    for key in ('admin_password', 'radio_password', 'lan_ap_key'):
+        value = conf.get(key, '').strip()
+        if value:
+            return value
+    return ''
+
+def get_perf_auth_token():
+    conf = load_kv_file(MESH_CONF_FILE)
+    manage_password = get_provisioned_manage_password(conf)
+    if not manage_password:
+        return ''
+    raw = f'{manage_password}|perf-local|v1|{_machine_token_salt()}'
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+def is_valid_perf_auth_token(token):
+    expected = get_perf_auth_token()
+    return bool(expected and token) and hmac.compare_digest(str(token), expected)
+
+def parse_cookie_header(header):
+    cookies = {}
+    if not header:
+        return cookies
+    for part in header.split(';'):
+        if '=' not in part:
+            continue
+        key, value = part.split('=', 1)
+        cookies[key.strip()] = value.strip()
+    return cookies
+
+def normalize_local_redirect(target):
+    target = str(target or '/').strip()
+    if not target.startswith('/'):
+        return '/'
+    if target.startswith('//'):
+        return '/'
+    return target
+
+def _first_flat_value(data, keys):
+    """Find the first matching key in a nested dict/list structure."""
+    if isinstance(data, dict):
+        for key in keys:
+            if key in data and data[key] not in (None, ''):
+                return data[key]
+        for value in data.values():
+            found = _first_flat_value(value, keys)
+            if found not in (None, ''):
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = _first_flat_value(item, keys)
+            if found not in (None, ''):
+                return found
+    return None
+
+def _json_from_text(text):
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text):
+        if char not in '[{':
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[idx:])
+            return data
+        except Exception:
+            pass
+    return None
+
+def _format_halow_bw(value):
+    if value in (None, ''):
+        return ''
+    text = str(value).strip()
+    low = text.lower()
+    if low.endswith('mhz'):
+        return text.replace('mhz', 'MHz').replace('MHZ', 'MHz')
+    try:
+        num = float(text)
+        if num >= 1000000:
+            num /= 1000000
+        elif num >= 1000:
+            num /= 1000
+        if num in (1, 2, 4):
+            return f'{int(num)}MHz'
+    except Exception:
+        pass
+    return text
+
+def _channel_from_frequency(freq_value):
+    try:
+        m = re.search(r'[0-9.]+', str(freq_value))
+        freq = float(m.group(0)) if m else None
+    except Exception:
+        return '', ''
+    if freq is None:
+        return '', ''
+    if freq > 1000000:
+        freq_khz = freq / 1000.0
+        freq_mhz = freq / 1000000.0
+    elif freq > 1000:
+        freq_khz = freq
+        freq_mhz = freq / 1000.0
+    else:
+        freq_khz = freq * 1000.0
+        freq_mhz = freq
+    channel = ''
+    for idx, center_khz in enumerate(HALOW_EU_CHANNELS, start=1):
+        if abs(freq_khz - center_khz) <= 500:
+            channel = str(idx)
+            break
+    return channel, f'{freq_mhz:.3f}'.rstrip('0').rstrip('.')
+
+def _parse_morse_channel_output(text):
+    info = {}
+    data = _json_from_text(text)
+    if data is not None:
+        freq = _first_flat_value(data, [
+            'channel_frequency', 'frequency', 'freq', 'freq_khz', 'freq_hz',
+            'operating_frequency', 'op_chan_freq'
+        ])
+        bw = _first_flat_value(data, [
+            'channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw',
+            'bandwidth', 'bw', 'op_chan_bw'
+        ])
+        idx = _first_flat_value(data, [
+            'channel_index', 'channel', 'primary_channel', 's1g_channel'
+        ])
+    else:
+        freq = None
+        bw = None
+        idx = None
+        for key in ('channel_frequency', 'frequency', 'freq_khz', 'freq_hz', 'op_chan_freq'):
+            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+)"?', text, re.I)
+            if m:
+                freq = m.group(1)
+                break
+        for key in ('channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw', 'bandwidth', 'op_chan_bw'):
+            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+\s*(?:[kKmM][hH][zZ])?)"?', text, re.I)
+            if m:
+                bw = m.group(1)
+                break
+        m = re.search(r'channel(?:_index)?\s*[:=]\s*"?(\d+)"?', text, re.I)
+        if m:
+            idx = m.group(1)
+
+    if freq not in (None, ''):
+        channel, freq_mhz = _channel_from_frequency(freq)
+        if channel:
+            info['channel'] = channel
+        if freq_mhz:
+            info['freq_mhz'] = freq_mhz
+    if bw not in (None, ''):
+        info['halow_bw'] = _format_halow_bw(bw)
+    if idx not in (None, '') and 'channel' not in info:
+        info['channel'] = str(idx)
+    if info:
+        info['halow_source'] = 'morse'
+    return info
+
+def get_halow_driver_info(iface='wlan2'):
+    """Read HaLow runtime channel data from Morse tooling; config is only fallback."""
+    binaries = ['/usr/local/bin/morse_cli', 'morse_cli']
+    variants = [
+        lambda b: [b, '-i', iface, 'channel', '-j'],
+        lambda b: [b, '-i', iface, 'channel', '--json'],
+        lambda b: [b, 'channel', '-i', iface, '-j'],
+        lambda b: [b, '-i', iface, 'channel'],
+        lambda b: [b, 'channel', '-i', iface],
+    ]
+    seen = set()
+    for binary in binaries:
+        if binary.startswith('/') and not os.path.exists(binary):
+            continue
+        for build in variants:
+            cmd = build(binary)
+            key = tuple(cmd)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            except Exception:
+                continue
+            text = (r.stdout or '') + '\n' + (r.stderr or '')
+            if r.returncode != 0 and not text.strip():
+                continue
+            parsed = _parse_morse_channel_output(text)
+            if parsed:
+                return parsed
+
+    info = {}
+    for conf_path in (
+        '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf',
+        '/etc/wpa_supplicant/wpa_supplicant_s1g-wlan2.conf',
+    ):
+        try:
+            with open(conf_path) as f:
+                txt = f.read()
+        except Exception:
+            continue
+        m = re.search(r'channel\s*=\s*(\d+)', txt)
+        if m:
+            info['channel'] = m.group(1)
+        m = re.search(r's1g_prim_chwidth\s*=\s*(\d+)', txt)
+        if m:
+            info['halow_bw'] = {'0': '1MHz', '1': '2MHz', '2': '4MHz'}.get(m.group(1), m.group(1))
+        if info:
+            info['halow_source'] = 'config'
+            return info
+    return info
+
+def wifi_channel_to_freq(iface, channel):
+    try:
+        ch = int(channel)
+    except Exception:
+        return None
+    if iface == 'wlan0' and 1 <= ch <= 13:
+        return 2407 + ch * 5
+    if iface == 'wlan1':
+        # Common 5 GHz channels; enough for manual dashboard control.
+        if ch == 14:
+            return 2484
+        if 32 <= ch <= 177:
+            return 5000 + ch * 5
+    return None
+
+def _fmt_dbm(value):
+    try:
+        num = float(value)
+    except Exception:
+        return ''
+    if abs(num - round(num)) < 0.05:
+        return str(int(round(num)))
+    return f'{num:.1f}'.rstrip('0').rstrip('.')
+
+def parse_phy_txpower_options(iw_phy_text):
+    options = {}
+    cur_phy = None
+    for line in (iw_phy_text or '').splitlines():
+        pm = re.match(r'Wiphy phy(\d+)', line)
+        if pm:
+            cur_phy = pm.group(1)
+            options.setdefault(cur_phy, set())
+            continue
+        if cur_phy is None:
+            continue
+        dm = re.search(r'\(([\d.]+)\s+dBm\)', line)
+        if dm:
+            fmt = _fmt_dbm(dm.group(1))
+            if fmt:
+                options[cur_phy].add(fmt)
+    return {
+        phy: sorted(vals, key=lambda v: float(v))
+        for phy, vals in options.items() if vals
+    }
+
+def txpower_choices_from_cap(cap_dbm):
+    try:
+        cap = int(float(cap_dbm))
+    except Exception:
+        return []
+    if cap < 1:
+        return []
+    return [str(v) for v in range(cap, 0, -1)]
+
+
+def get_halow_bw_txpower_cap(bw):
+    return HALOW_BW_TXPOWER_CAP_DBM.get(_format_halow_bw(bw), '')
+
+def get_iface_txpower_cap(iface):
+    try:
+        r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return ''
+        if iface == 'wlan2':
+            bw_cap = get_halow_bw_txpower_cap(get_halow_driver_info(iface).get('halow_bw', ''))
+            if bw_cap:
+                return bw_cap
+        phy = ''
+        current = ''
+        m = re.search(r'txpower ([\d.]+) dBm', r.stdout)
+        if m:
+            current = _fmt_dbm(m.group(1))
+        m = re.search(r'wiphy (\d+)', r.stdout)
+        if m:
+            phy = m.group(1)
+        else:
+            m = re.search(r'wdev (0x[0-9a-fA-F]+)', r.stdout)
+            if m:
+                phy = str(int(m.group(1), 16) >> 32)
+        if not phy:
+            return current
+        r = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
+        options = parse_phy_txpower_options(r.stdout).get(phy, [])
+        if not options:
+            return current
+        cap = max(options, key=lambda v: float(v))
+        if iface == 'wlan2' and current:
+            return _fmt_dbm(min(float(cap), float(current)))
+        return _fmt_dbm(cap)
+    except Exception:
+        return ''
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry Parser
@@ -229,6 +562,21 @@ def get_battery():
                 continue
     return None
 
+def get_peer_local_data(peer_ip, timeout=1.0):
+    """Fetch live /api/local from a peer over the mesh; return {} on failure."""
+    if not peer_ip:
+        return {}
+    try:
+        ipaddress.ip_address(peer_ip)
+        req = urllib.request.Request(
+            f'http://{peer_ip}:80/api/local',
+            headers={'User-Agent': 'manet-status/1'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return {}
+
 def get_interfaces():
     """
     Return list of interface dicts with role, health, and fault details.
@@ -263,10 +611,79 @@ def get_interfaces():
                 if sm: iw_info[cur_iface]['ssid'] = sm.group(1).strip()
                 fm = re.search(r'channel (\d+).*MHz', line)
                 if fm: iw_info[cur_iface]['channel'] = fm.group(1)
+                pm = re.search(r'txpower ([\d.]+) dBm', line)
+                if pm: iw_info[cur_iface]['txpower_dbm'] = pm.group(1)
                 freqm = re.search(r'([\d.]+) GHz', line)
                 if freqm: iw_info[cur_iface]['freq'] = freqm.group(1)
+                wm = re.search(r'wiphy (\d+)', line)
+                if wm: iw_info[cur_iface]['wiphy'] = wm.group(1)
+                dm = re.search(r'wdev (0x[0-9a-fA-F]+)', line)
+                if dm: iw_info[cur_iface]['wiphy'] = str(int(dm.group(1), 16) >> 32)
     except Exception:
         pass
+
+    # Build phy→band map: Band 1 = 2.4 GHz, Band 2 = 5 GHz (IEEE 802.11 convention)
+    # A phy with both bands → 2.4 GHz takes precedence (dual-band chip)
+    phy_band = {}  # wiphy_num_str -> '2.4 GHz' | '5 GHz'
+    phy_txpower_options = {}
+    try:
+        r3 = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
+        phy_txpower_options = parse_phy_txpower_options(r3.stdout)
+        cur_phy = None
+        for line in r3.stdout.splitlines():
+            pm = re.match(r'Wiphy phy(\d+)', line)
+            if pm:
+                cur_phy = pm.group(1)
+                continue
+            if cur_phy is None:
+                continue
+            bh = re.match(r'\s+Band (\d+):', line)
+            if bh:
+                band_num = int(bh.group(1))
+                if band_num == 1:
+                    phy_band[cur_phy] = '2.4 GHz'  # Band 1 always 2.4 GHz
+                elif band_num == 2 and cur_phy not in phy_band:
+                    phy_band[cur_phy] = '5 GHz'    # Band 2 = 5 GHz, only if no Band 1
+    except Exception:
+        pass
+
+    # Read driver via ethtool and assign band_label
+    for iname in list(iw_info.keys()):
+        driver = ''
+        try:
+            et = subprocess.run(['ethtool', '-i', iname], capture_output=True, text=True, timeout=3)
+            for line in et.stdout.splitlines():
+                if line.startswith('driver:'):
+                    driver = line.split(':', 1)[1].strip()
+                    break
+        except Exception:
+            pass
+        iw_info[iname]['driver'] = driver
+        if 'morse' in driver:
+            iw_info[iname]['band_label'] = 'HaLow 900MHz'
+        else:
+            # Try runtime freq first, fall back to phy capability
+            freq_str = iw_info[iname].get('freq', '')
+            try:
+                freq_f = float(freq_str)
+                if freq_f < 2.0:
+                    iw_info[iname]['band_label'] = 'HaLow 900MHz'
+                elif freq_f < 3.0:
+                    iw_info[iname]['band_label'] = '2.4 GHz'
+                else:
+                    iw_info[iname]['band_label'] = '5 GHz'
+            except ValueError:
+                wiphy_num = iw_info[iname].get('wiphy', '')
+                iw_info[iname]['band_label'] = phy_band.get(wiphy_num, '')
+        cap = get_iface_txpower_cap(iname)
+        if cap:
+            iw_info[iname]['txpower_cap_dbm'] = cap
+            iw_info[iname]['txpower_options_dbm'] = txpower_choices_from_cap(cap)
+
+    # HaLow (morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
+    for iname in list(iw_info.keys()):
+        if 'morse' in iw_info[iname].get('driver', ''):
+            iw_info[iname].update(get_halow_driver_info(iname))
 
     # ── bat0 slaves (active interfaces per batctl) ──
     bat0_slaves_active   = set()   # confirmed active in batctl
@@ -358,9 +775,15 @@ def get_interfaces():
         ):
             # Mesh radio
             role = 'mesh'
-            freq = iw.get('freq', '')
-            ch   = iw.get('channel', '')
-            detail = f"Mesh radio — {freq}GHz ch{ch}" if freq else 'Mesh radio'
+            freq        = iw.get('freq', '')
+            ch          = iw.get('channel', '')
+            band_label  = iw.get('band_label', '')
+            if band_label:
+                detail = f"{band_label} — ch{ch}" if ch else band_label
+            elif freq:
+                detail = f"Mesh radio — {freq}GHz ch{ch}"
+            else:
+                detail = 'Mesh radio'
             if iw.get('ssid'):
                 detail += f" [{iw['ssid']}]"
 
@@ -426,13 +849,20 @@ def get_interfaces():
                 faults.append(f'Not in bat0 and not an AP — check wpa_supplicant')
 
         ifaces.append({
-            'name':   name,
-            'role':   role,
-            'health': health,
-            'detail': detail,
-            'faults': faults,
-            'addrs':  addrs,
-            'state':  state,
+            'name':     name,
+            'role':     role,
+            'health':   health,
+            'detail':   detail,
+            'faults':   faults,
+            'addrs':    addrs,
+            'state':    state,
+            'channel':  iw.get('channel', ''),
+            'freq_mhz': iw.get('freq_mhz', ''),
+            'txpower_dbm': iw.get('txpower_dbm', ''),
+            'txpower_cap_dbm': iw.get('txpower_cap_dbm', ''),
+            'txpower_options_dbm': iw.get('txpower_options_dbm', []),
+            'halow_bw': iw.get('halow_bw', ''),
+            'halow_source': iw.get('halow_source', ''),
         })
 
     # Sort: bat0, mesh, ap, gateway, eud-bridge, bridge, other
@@ -572,20 +1002,6 @@ def is_allowed_ip(client_ip, conf):
         pass
     return False
 
-def check_admin_auth(handler, conf):
-    admin_pw = conf.get('admin_password', '')
-    if not admin_pw:
-        return False
-    auth = handler.headers.get('Authorization', '')
-    if auth.startswith('Basic '):
-        try:
-            decoded = base64.b64decode(auth[6:]).decode('utf-8')
-            _, password = decoded.split(':', 1)
-            return password == admin_pw
-        except Exception:
-            pass
-    return False
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Data Assembly
 # ─────────────────────────────────────────────────────────────────────────────
@@ -593,6 +1009,7 @@ def assemble_status_data():
     conf       = load_kv_file(MESH_CONF_FILE)
     state      = load_kv_file(MESH_STATE_FILE)
     nodes_raw  = parse_registry()
+    local_battery = get_battery()
     orig_tq, orig_map = run_batctl_originators()
     neighbors  = run_batctl_neighbors()
     gateways   = run_batctl_gateways()
@@ -642,8 +1059,16 @@ def assemble_status_data():
 
         is_me = (my_mac and node_mac == my_mac) or (hostname == my_host)
         if is_me:
-            tq = 255
+            tq = None
             self_found = True
+
+        battery = {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None
+        if is_me and local_battery and local_battery.get('percentage') is not None:
+            battery = local_battery
+        elif not is_me and ndata.get('IPV4_ADDRESS'):
+            peer_battery = get_peer_local_data(ndata.get('IPV4_ADDRESS'), timeout=0.8).get('battery')
+            if isinstance(peer_battery, dict) and peer_battery.get('percentage') is not None:
+                battery = peer_battery
 
         all_node_macs = [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()]
         is_direct = any(m in neighbor_macs for m in all_node_macs) or node_mac in neighbor_macs
@@ -663,8 +1088,8 @@ def assemble_status_data():
                 selected_gw in [norm_mac(m) for m in ndata.get('MAC_ADDRESSES','').split(',') if m.strip()]
             )),
             'uptime':       fmt_uptime(ndata.get('UPTIME_SECONDS', '')),
-            'cpu':          ndata.get('CPU_LOAD_AVERAGE', ''),
-            'battery':      {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None,
+            'cpu':          (f"{float(ndata['CPU_LOAD_AVERAGE']):.2f}" if ndata.get('CPU_LOAD_AVERAGE') else ''),
+            'battery':      battery,
             'mumble':       ndata.get('IS_MUMBLE_SERVER', 'false').lower() == 'true',
             'mediamtx':     ndata.get('IS_MEDIAMTX_SERVER', 'false').lower() == 'true',
             'ntp':          ndata.get('IS_NTP_SERVER', 'false').lower() == 'true',
@@ -682,7 +1107,7 @@ def assemble_status_data():
             'hostname': my_host,
             'mac': my_mac or '',
             'ip': (state.get('CURRENT_IPV4') or ''),
-            'tq': 255, 'is_me': True, 'is_direct': True,
+            'tq': None, 'is_me': True, 'is_direct': True,
             'is_gateway': False, 'is_selected_gw': False,
             'uptime': '', 'cpu': '', 'battery': None,
             'mumble': False, 'mediamtx': False, 'ntp': False,
@@ -783,119 +1208,203 @@ def assemble_status_data():
 # ─────────────────────────────────────────────────────────────────────────────
 CSS = """
 :root {
-  --bg:       #0a0e14;
-  --surface:  #111820;
-  --border:   #1e3048;
-  --accent:   #00b4d8;
-  --accent2:  #0077b6;
-  --text:     #cdd6e0;
-  --muted:    #556677;
+  --bg:       #ebeae8;
+  --surface:  #ffffff;
+  --panel:    #f7f6f3;
+  --border:   #d6d2cb;
+  --border2:  #e7e2da;
+  --accent:   #02000d;
+  --accent2:  #ecb000;
+  --info:     #02000d;
+  --fer-yellow:#ecb000;
+  --fer-black:#02000d;
+  --text:     #02000d;
+  --muted:    #615f68;
   --good:     #22c55e;
-  --ok:       #eab308;
-  --warn:     #f97316;
+  --ok:       #ecb000;
+  --warn:     #ecb000;
   --bad:      #ef4444;
-  --gw:       #f59e0b;
-  --self:     #818cf8;
-  --font:     'Courier New', monospace;
+  --gw:       #ecb000;
+  --self:     #ecb000;
+  --shadow:   0 18px 50px rgba(2,0,13,.10);
+  --font:     Roobert, Arial, sans-serif;
+}
+:root[data-theme="dark"] {
+  --bg:       #02000d;
+  --surface:  #121118;
+  --panel:    #0b0a12;
+  --border:   #34313b;
+  --border2:  #24212b;
+  --accent:   #f8f6ef;
+  --accent2:  #ecb000;
+  --info:     #9fa8ff;
+  --text:     #f8f6ef;
+  --muted:    #aaa5b2;
+  --gw:       #ecb000;
+  --self:     #ecb000;
+  --shadow:   0 18px 50px rgba(0,0,0,.36);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; overflow-x: hidden; }
+html { min-height: 100%; scroll-behavior: smooth; }
+body { min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: auto; text-rendering: optimizeLegibility; }
+body {
+  background:
+    radial-gradient(circle at top left, rgba(236,176,0,.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(2,0,13,.08), transparent 24%),
+    var(--bg);
+}
 
 /* ── Layout ── */
-#app { display: flex; flex-direction: column; height: 100vh; }
-#header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 12px 0 0; display: flex; align-items: stretch; gap: 0; flex-shrink: 0; height: 34px; }
+#app { display: flex; flex-direction: column; min-height: 100vh; }
+#header { background: rgba(255,255,255,.94); backdrop-filter: blur(18px); border-bottom: 1px solid var(--border2); padding: 10px 14px 10px 0; display: grid; grid-template-columns: auto 1fr; grid-template-areas: "brand brand" "meta meta" "actions actions"; row-gap: 8px; column-gap: 12px; flex-shrink: 0; min-height: 58px; box-shadow: 0 1px 0 rgba(2,0,13,.05); position: relative; }
+#header::after { content:''; position:absolute; left:0; right:0; bottom:0; height:2px; background: linear-gradient(90deg, rgba(236,176,0,.92) 0 36%, rgba(236,176,0,.28) 36% 68%, transparent 68%); pointer-events:none; }
+:root[data-theme="dark"] #header { background: rgba(18,17,24,.92); }
 /* Health pill — left edge strip */
 #hdr-health { display: flex; align-items: center; gap: 7px; padding: 0 14px 0 12px;
               border-right: 1px solid var(--border); margin-right: 12px; flex-shrink: 0;
               transition: background 0.4s; }
 #hdr-health-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
-                  box-shadow: 0 0 6px currentColor; transition: background 0.4s, color 0.4s; }
-#hdr-health-label { font-size: 10px; font-weight: bold; letter-spacing: 1px;
+                  box-shadow: none; transition: background 0.4s, color 0.4s; }
+#hdr-health-label { font-size: 11px; font-weight: 800; letter-spacing: 0;
                     transition: color 0.4s; white-space: nowrap; }
-.health-ok   { color: var(--good); background: #22c55e12; }
-.health-warn { color: var(--warn); background: #f9731612; }
-.health-fault{ color: var(--bad);  background: #ef444412; }
+.health-ok   { color: #136c36; background: rgba(22,163,74,.07); }
+.health-warn { color: #8a6a00; background: rgba(236,176,0,.12); }
+.health-fault{ color: #b42318; background: rgba(180,35,24,.08); }
 .health-loading { color: var(--muted); background: transparent; }
+.hdr-brand { grid-area: brand; display:flex; align-items:center; gap:8px; min-width:0; padding-left:12px; }
+.fer-lockup { display:flex; align-items:center; justify-content:flex-start; align-self:center; height:58px; min-width:clamp(104px,18vw,172px); width:clamp(104px,18vw,172px); padding:0 8px 0 0; border-right:1px solid var(--border); color:var(--fer-black); overflow:hidden; flex:0 0 auto; }
+.fer-logo-img { display:block; width:clamp(104px,18vw,172px); height:48px; max-width:none; object-fit:contain; object-position:left center; filter:none; transition:width .18s ease,height .18s ease,filter .18s ease; }
+:root[data-theme="dark"] .fer-lockup { color:#ffffff; }
+:root[data-theme="dark"] .fer-logo-img { filter: brightness(0) invert(1); }
+.hdr-logo { color: var(--text); font-size: 17px; letter-spacing: 0; font-weight: 900; display:flex; align-items:center; min-height:46px; line-height:1; }
+.hdr-logo span { color: var(--accent2); }
+.theme-toggle { border:1px solid var(--accent2); background:rgba(236,176,0,.10); color:var(--text); border-radius:999px; padding:6px 10px; font-family:var(--font); font-size:11px; font-weight:850; cursor:pointer; min-width:74px; }
+.theme-toggle:hover { background:var(--accent2); color:var(--fer-black); box-shadow:0 8px 22px rgba(236,176,0,.20); }
+.perf-link-btn { border:1px solid var(--accent2); background:var(--accent2); color:var(--fer-black); border-radius:999px; padding:6px 12px; font-family:var(--font); font-size:11px; font-weight:850; cursor:pointer; min-width:92px; transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease; box-shadow:0 8px 20px rgba(236,176,0,.16); }
+.perf-link-btn:hover { background:#f6c62f; color:var(--fer-black); box-shadow:0 10px 24px rgba(236,176,0,.26); transform:translateY(-1px); }
+:root[data-theme="dark"] .perf-link-btn { background:var(--accent2); color:var(--fer-black); border-color:var(--accent2); }
+:root[data-theme="dark"] .perf-link-btn:hover { background:#f6c62f; color:var(--fer-black); box-shadow:0 10px 24px rgba(236,176,0,.28); }
 /* Centre identity items */
-#header .meta { color: var(--muted); font-size: 11px; display: flex; align-items: center; }
-#hdr-hostname { color: var(--text); font-size: 12px; font-weight: bold; padding-right: 10px;
+#header .meta { color: var(--muted); font-size: 12px; display: flex; align-items: center; }
+#hdr-meta { grid-area: meta; display:flex; align-items:center; gap:0; flex-wrap:wrap; min-width:0; padding-left:12px; }
+#hdr-hostname { color: var(--text); font-size: 13px; font-weight: 800; padding-right: 10px;
                 border-right: 1px solid var(--border); margin-right: 10px; }
-#hdr-ssid { color: var(--accent); }
-#header .spacer { flex: 1; }
+#hdr-ssid { color: var(--text); }
+#header .spacer { display:none; }
 /* Right-side items */
-#hdr-right { display: flex; align-items: center; gap: 12px; }
+#hdr-right { grid-area: actions; display: flex; align-items: center; gap: 12px; flex-wrap:wrap; padding-left:12px; }
 #hdr-gw-label { font-size: 11px; }
 .gw-ok   { color: var(--good); }
 .gw-none { color: var(--muted); }
-.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: bold; letter-spacing: 1px; }
-.pill-accent { background: #00b4d820; color: var(--accent); border: 1px solid #00b4d840; }
-.pill-gw     { background: #f59e0b20; color: var(--gw);    border: 1px solid #f59e0b40; }
-.pill-self   { background: #818cf820; color: var(--self);  border: 1px solid #818cf840; }
+.pill { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: 0; }
+.pill-accent { background: rgba(236,176,0,.10); color: var(--text); border: 1px solid rgba(236,176,0,.30); }
+.pill-gw     { background: rgba(236,176,0,.14); color: var(--fer-black); border: 1px solid rgba(236,176,0,.38); }
+.pill-self   { background: rgba(236,176,0,.16); color: var(--fer-black); border: 1px solid rgba(236,176,0,.34); }
 
 /* ── Main Panels ── */
-#main { display: flex; flex: 1; overflow: hidden; }
-#topo-panel { flex: 1; position: relative; min-width: 0; }
-#topo-panel canvas { width: 100%; height: 100%; display: block; }
-#side-panel { width: 280px; flex-shrink: 0; overflow-y: auto; border-left: 1px solid var(--border); background: var(--surface); }
+#main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; flex: 1; padding: 16px; align-items: start; }
+#topo-panel {
+  position: relative; min-width: 0; min-height: 520px;
+  background:
+    radial-gradient(circle at 14% 18%, rgba(236,176,0,.24), transparent 18%),
+    radial-gradient(circle at 84% 12%, rgba(2,0,13,.10), transparent 20%),
+    radial-gradient(circle at 50% 120%, rgba(236,176,0,.12), transparent 28%),
+    var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px rgba(2,0,13,.04),
+    inset 0 0 80px rgba(236,176,0,.08),
+    inset 0 0 120px rgba(2,0,13,.04),
+    0 22px 52px rgba(2,0,13,.08);
+}
+#topo-panel::after { content:''; position:absolute; right:18px; bottom:18px; width:120px; height:120px; background:radial-gradient(circle, rgba(236,176,0,.16), transparent 72%); pointer-events:none; }
+#topo-panel canvas { width: 100%; height: 100%; display: block; touch-action: pan-y pinch-zoom; }
+#side-panel { width: 100%; overflow: visible; border: 1px solid var(--border2); border-radius: 18px; background: var(--surface); box-shadow: 0 18px 44px rgba(2,0,13,.06); }
 
 /* ── Node Table ── */
-.section-hdr { padding: 8px 10px; font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); z-index: 1; }
-.node-row { padding: 7px 10px; border-bottom: 1px solid #1e304860; cursor: default; transition: background .15s; }
-.node-row:hover { background: #1a2535; }
+.section-hdr { padding: 12px 14px; font-size: 11px; font-weight: 800; letter-spacing: .3px; color: var(--muted); text-transform: none; border-bottom: 1px solid var(--border2); position: sticky; top: 0; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(12px); z-index: 1; }
+.node-row { padding: 10px 12px; border-bottom: 1px solid var(--border2); cursor: pointer; transition: background .18s ease, transform .18s ease; }
+.node-row:hover { background: rgba(236,176,0,.08); transform: translateY(-1px); }
 .node-row.is-me { border-left: 2px solid var(--self); }
 .node-row.is-gw { border-left: 2px solid var(--gw); }
 .node-row.is-me.is-gw { border-left: 2px solid var(--gw); }
-.node-name { font-size: 13px; font-weight: bold; display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
-.node-ip { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
-.node-meta { display: flex; gap: 6px; flex-wrap: wrap; }
-.badge { padding: 1px 5px; border-radius: 3px; font-size: 10px; }
-.badge-tq-great  { background: #22c55e20; color: var(--good); }
-.badge-tq-ok     { background: #eab30820; color: var(--ok); }
-.badge-tq-warn   { background: #f9731620; color: var(--warn); }
-.badge-tq-bad    { background: #ef444420; color: var(--bad); }
-.badge-tq-none   { background: #33333320; color: var(--muted); }
-.badge-svc       { background: #0077b620; color: #60b8d4; }
-.badge-gw        { background: #f59e0b20; color: var(--gw); }
-.badge-direct    { background: #22c55e10; color: #4ade80; }
-.tq-bar-wrap     { margin-top: 4px; height: 3px; background: #1e3048; border-radius: 2px; overflow: hidden; }
+.node-row.peer-selected { background: rgba(236,176,0,.12); outline: 1px solid rgba(236,176,0,.36); outline-offset: -1px; }
+.node-summary { min-width: 0; }
+.node-name { font-size: 12px; font-weight: bold; display: flex; align-items: center; gap: 5px; margin-bottom: 2px; }
+.node-ip { color: var(--muted); font-size: 10px; margin-bottom: 2px; }
+.node-meta { display: flex; gap: 5px; flex-wrap: wrap; }
+.node-inline-detail { margin-top: 12px; border: 1px solid var(--border2); border-radius: 14px; overflow: hidden; background: color-mix(in srgb, var(--surface) 96%, rgba(236,176,0,.06)); box-shadow: 0 16px 34px rgba(2,0,13,.05); }
+.inline-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--border2); background: transparent; }
+.inline-detail-title { font-size: 12px; font-weight: 800; color: var(--text); }
+.node-inline-detail .section-hdr { position: static; top: auto; }
+.badge { padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 750; }
+.badge-tq-great  { background: rgba(22,163,74,.07); color: var(--text); border:1px solid rgba(22,163,74,.28); }
+.badge-tq-ok     { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.28); }
+.badge-tq-warn   { background: rgba(217,119,6,.08); color: var(--text); border:1px solid rgba(217,119,6,.28); }
+.badge-tq-bad    { background: rgba(180,35,24,.08); color: var(--text); border:1px solid rgba(180,35,24,.28); }
+.badge-tq-none   { background: #f7f8fa; color: var(--muted); }
+.badge-svc       { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.26); }
+.badge-gw        { background: rgba(236,176,0,.14); color: var(--fer-black); }
+.badge-direct    { background: #ecfdf3; color: #136c36; }
+.self-node-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: .2px;
+  background: linear-gradient(135deg, rgba(236,176,0,.96), rgba(236,176,0,.82));
+  color: var(--fer-black);
+  border: 1px solid rgba(236,176,0,.40);
+  box-shadow: 0 0 0 1px rgba(236,176,0,.12), 0 0 18px rgba(236,176,0,.18), 0 0 30px rgba(236,176,0,.16);
+}
+:root[data-theme="dark"] .self-node-badge {
+  background: linear-gradient(135deg, rgba(236,176,0,.96), rgba(236,176,0,.82));
+  color: var(--fer-black);
+  border-color: rgba(236,176,0,.48);
+  box-shadow: 0 0 0 1px rgba(236,176,0,.14), 0 0 18px rgba(236,176,0,.20), 0 0 34px rgba(236,176,0,.18);
+}
+.tq-bar-wrap     { margin-top: 6px; height: 5px; background: var(--border2); border-radius: 999px; overflow: hidden; }
 .tq-bar          { height: 100%; border-radius: 2px; transition: width .5s; }
 
 /* ── Tooltip ── */
-#tooltip { position: fixed; background: #0d1821ee; border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px; pointer-events: none; font-size: 11px; line-height: 1.6; display: none; z-index: 100; max-width: 220px; }
-
 /* ── Admin Page ── */
 .admin-wrap { max-width: 600px; margin: 0 auto; padding: 16px 12px 40px; }
-.admin-wrap h2 { color: var(--accent); font-size: 16px; letter-spacing: 2px; margin-bottom: 4px; }
-.admin-wrap .notice { color: var(--warn); font-size: 11px; margin-bottom: 20px; padding: 8px; background: #f9731610; border: 1px solid #f9731630; border-radius: 4px; }
-.form-section { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; }
-.form-section-title { padding: 8px 12px; font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; border-bottom: 1px solid var(--border); }
-.form-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #1e304840; }
+.admin-wrap h2 { color: var(--text); font-size: 18px; letter-spacing: 0; margin-bottom: 4px; }
+.admin-wrap .notice { color: #8a6a00; font-size: 11px; margin-bottom: 20px; padding: 8px; background: rgba(236,176,0,.12); border: 1px solid rgba(236,176,0,.28); border-radius: 4px; }
+.form-section { background: var(--surface); border: 1px solid var(--border2); border-radius: 8px; margin-bottom: 16px; box-shadow: var(--shadow); }
+.form-section-title { padding: 12px 14px; font-size: 12px; font-weight: 800; letter-spacing: 0; color: var(--text); text-transform: none; border-bottom: 1px solid var(--border2); }
+.form-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border2); }
 .form-row:last-child { border-bottom: none; }
 .form-row label { flex: 0 0 160px; color: var(--text); font-size: 12px; }
 .form-row .hint  { font-size: 10px; color: var(--muted); display: block; margin-top: 2px; }
 .form-row input[type=text], .form-row input[type=password], .form-row select {
-  flex: 1; background: #0a0e14; border: 1px solid var(--border); color: var(--text);
+  flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text);
   padding: 5px 8px; border-radius: 4px; font-family: var(--font); font-size: 12px;
 }
 .form-row input[type=text]:focus, .form-row input[type=password]:focus, .form-row select:focus {
   outline: none; border-color: var(--accent);
 }
-.form-row select option { background: #111820; }
+.form-row select option { background: var(--surface); }
 .form-row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
-.form-btn { display: block; width: 100%; padding: 10px; background: var(--accent2); color: #fff;
-  border: none; border-radius: 4px; font-family: var(--font); font-size: 13px; letter-spacing: 1px;
+.form-btn { display: block; width: 100%; padding: 10px; background: var(--accent2); color: var(--fer-black);
+  border: 1px solid var(--accent2); border-radius: 8px; font-family: var(--font); font-size: 13px; font-weight:850; letter-spacing: 0;
   cursor: not-allowed; opacity: .6; margin-top: 8px; text-transform: uppercase; }
 .form-btn.active { cursor: pointer; opacity: 1; }
 
 /* ── Local Node Panel ── */
-.local-panel { border-bottom: 1px solid var(--border); }
-.local-row { display: flex; align-items: flex-start; gap: 6px; padding: 5px 10px; border-bottom: 1px solid #1e304830; font-size: 12px; }
+.local-panel { border-bottom: 1px solid var(--border2); }
+.local-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--border2); font-size: 12px; }
 .local-row:last-child { border-bottom: none; }
 .local-label { flex: 0 0 90px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .8px; padding-top: 1px; }
 .local-val { flex: 1; color: var(--text); word-break: break-all; }
-.iface-row { padding: 5px 10px; border-bottom: 1px solid #1e304820; position: relative; }
-.iface-row.health-fault { border-left: 2px solid var(--bad);  background: #ef444408; }
-.iface-row.health-warn  { border-left: 2px solid var(--warn); background: #f9731608; }
+.iface-row { padding: 8px 12px; border-bottom: 1px solid var(--border2); position: relative; }
+.iface-row.health-fault { border-left: 2px solid var(--bad);  background: rgba(180,35,24,.08); }
+.iface-row.health-warn  { border-left: 2px solid var(--warn); background: rgba(217,119,6,.08); }
 .iface-row.health-ok    { border-left: 2px solid transparent; }
 .iface-row.health-info  { border-left: 2px solid transparent; }
 .iface-header { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 2px; }
@@ -904,14 +1413,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .iface-state-up      { color: var(--good); }
 .iface-state-down    { color: var(--bad); background: #ef444420; }
 .iface-state-unknown { color: var(--muted); }
-.iface-role { font-size: 10px; padding: 1px 5px; border-radius: 3px; }
-.role-mesh     { background:#00b4d820; color:var(--accent); }
-.role-ap       { background:#22c55e20; color:var(--good); }
-.role-gateway  { background:#f59e0b20; color:var(--gw); }
-.role-bat      { background:#818cf820; color:var(--self); }
-.role-bridge   { background:#818cf820; color:var(--self); }
-.role-eud-bridge{ background:#22c55e20; color:var(--good); }
-.role-other    { background:#33333320; color:var(--muted); }
+.iface-role { font-size: 10px; padding: 2px 6px; border-radius: 999px; font-weight: 750; }
+.role-mesh     { background:rgba(236,176,0,.10); color:var(--text); }
+.role-ap       { background:#ecfdf3; color:#136c36; }
+.role-gateway  { background:rgba(236,176,0,.14); color:var(--fer-black); }
+.role-bat      { background:rgba(236,176,0,.10); color:var(--text); }
+.role-bridge   { background:rgba(236,176,0,.10); color:var(--text); }
+.role-eud-bridge{ background:#ecfdf3; color:#136c36; }
+.role-other    { background:#f7f8fa; color:var(--muted); }
 .iface-detail  { font-size: 10px; color: var(--muted); }
 .iface-addrs   { font-size: 10px; color: #60b8d4; }
 .iface-fault   { font-size: 10px; color: var(--bad); margin-top: 2px; }
@@ -922,37 +1431,39 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
                background:#ef444420; color:var(--bad); margin-left:6px; vertical-align:middle; }
 .warn-count  { display:inline-block; padding:1px 5px; border-radius:3px; font-size:10px;
                background:#f9731620; color:var(--warn); margin-left:6px; vertical-align:middle; }
-/* ── Peer Detail Drawer ── */
-#peer-drawer { display: flex; flex-direction: column; border-bottom: 1px solid var(--border);
-               background: var(--surface); flex-shrink: 0; max-height: 55vh; overflow-y: auto; }
-#peer-drawer-hdr { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-                   border-bottom: 1px solid var(--border); background: #0d1520;
-                   position: sticky; top: 0; z-index: 1; flex-shrink: 0; }
-#peer-drawer-title { flex: 1; font-size: 13px; font-weight: bold; color: var(--accent); }
-#peer-drawer-body { overflow-y: auto; flex: 1; }
 .peer-loading { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; letter-spacing: 1px; }
-.node-row.peer-selected { background: #1a2535; outline: 1px solid var(--accent); outline-offset: -1px; }
-.eud-row { padding: 4px 10px; border-bottom: 1px solid #1e304820; font-size: 11px; }
+.eud-row { padding: 5px 12px; border-bottom: 1px solid var(--border2); font-size: 11px; }
 .eud-row:last-child { border-bottom: none; }
 .eud-name { color: var(--text); }
 .eud-ip   { color: #60b8d4; }
 .eud-mac  { color: var(--muted); font-size: 10px; }
 .svc-grid { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 10px; }
-.svc-pill { padding: 3px 8px; border-radius: 4px; font-size: 10px; letter-spacing: .5px; }
-.svc-on  { background: #22c55e20; color: var(--good); border: 1px solid #22c55e40; }
-.svc-off { background: #1e304840; color: var(--muted); border: 1px solid #1e304860; }
-.batt-bar-wrap { display:inline-block; width:36px; height:10px; background:#1e3048; border-radius:2px; overflow:hidden; vertical-align:middle; margin-left:4px; }
+.svc-pill { padding: 4px 8px; border-radius: 999px; font-size: 10px; font-weight: 750; letter-spacing: 0; }
+.svc-on  { background: rgba(22,163,74,.07); color: var(--text); border: 1px solid rgba(22,163,74,.28); }
+.svc-off { background: #f7f8fa; color: var(--muted); border: 1px solid var(--border); }
+.batt-bar-wrap { display:inline-block; width:36px; height:10px; background:var(--border2); border-radius:999px; overflow:hidden; vertical-align:middle; margin-left:4px; }
 .batt-bar { height:100%; border-radius:2px; }
 .gps-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; vertical-align:middle; }
 
 /* ── Loading / Error ── */
-#loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; letter-spacing: 2px; }
+#loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: 0; backdrop-filter: blur(2px); }
 
 /* ── Responsive: narrow → stack ── */
 @media (max-width: 768px) {
-  #main { flex-direction: column; }
-  #topo-panel { height: var(--topo-h, 50vh); min-height: 80px; flex: none; }
-  #side-panel { width: 100%; flex: 1; overflow-y: auto; border-left: none; border-top: none; }
+  #main { grid-template-columns: 1fr; gap: 10px; padding: 10px; }
+  #topo-panel { order: 1; height: var(--topo-h, 46vh); min-height: 260px; }
+  #drag-handle { order: 2; }
+  #side-panel { order: 3; width: 100%; overflow: visible; }
+  #header { grid-template-columns:1fr; grid-template-areas:"brand" "meta" "actions"; height: auto; min-height: 58px; padding: 8px 10px 10px; row-gap:6px; }
+  .hdr-brand { padding-left:0; gap:6px; }
+  .fer-lockup { min-width:clamp(92px,24vw,132px); width:clamp(92px,24vw,132px); height:46px; padding-right:4px; }
+  .fer-logo-img { width: clamp(92px,24vw,132px); height: 38px; }
+  .hdr-logo { font-size:15px; min-height:38px; }
+  #hdr-meta { padding-left:0; }
+  #hdr-hostname { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #hdr-right { margin-left: 0; gap: 8px; justify-content: flex-start; padding-left:0; }
+  #header .meta { font-size: 11px; }
+  .theme-toggle { padding: 5px 8px; min-width: 66px; }
 }
 @media (min-width: 769px) {
   #drag-handle { display: none; }
@@ -963,13 +1474,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   justify-content: center;
   height: 22px;
   background: var(--surface);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border2);
+  border-radius: 999px;
   cursor: row-resize;
   flex-shrink: 0;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+  margin: -2px auto 0;
+  width: calc(100% - 24px);
 }
 #drag-handle::before {
   content: '';
@@ -992,21 +1505,28 @@ STATUS_HTML = r"""<!DOCTYPE html>
 <body>
 <div id="app">
   <div id="header">
-    <!-- Health pill -->
-    <div id="hdr-health" class="health-loading">
-      <div id="hdr-health-dot"></div>
-      <span id="hdr-health-label">—</span>
+    <div class="hdr-brand">
+      <div class="fer-lockup" title="FER" aria-label="FER">
+        <img class="fer-logo-img" src="/assets/fer-logo-black.svg" data-light="/assets/fer-logo-black.svg" data-dark="/assets/fer-logo-white.svg" alt="FER">
+      </div>
+      <div class="hdr-logo">MANET//<span>STAT</span></div>
     </div>
-    <!-- Identity -->
-    <div class="meta" id="hdr-hostname">—</div>
-    <div class="meta" id="hdr-ip" style="padding-right:10px">—</div>
-    <div class="meta" id="hdr-ssid">—</div>
-    <div class="spacer"></div>
-    <!-- Right: mesh stats -->
+    <div id="hdr-meta">
+      <div id="hdr-health" class="health-loading">
+        <div id="hdr-health-dot"></div>
+        <span id="hdr-health-label">—</span>
+      </div>
+      <div class="meta" id="hdr-hostname">—</div>
+      <div class="meta" id="hdr-ip" style="padding-right:10px">—</div>
+      <div class="meta" id="hdr-ssid">—</div>
+      <div class="spacer"></div>
+    </div>
     <div id="hdr-right">
+      <button id="perf-link" class="perf-link-btn" type="button" onclick="goPerfDashboard()">MANAGE</button>
       <div class="meta" id="hdr-nodes">—</div>
       <div class="meta" id="hdr-gw-label">—</div>
       <div class="meta" id="hdr-time" style="color:var(--muted);min-width:54px;text-align:right">—</div>
+      <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()">Dark</button>
     </div>
   </div>
   <div id="main">
@@ -1016,25 +1536,63 @@ STATUS_HTML = r"""<!DOCTYPE html>
     </div>
     <div id="drag-handle"></div>
     <div id="side-panel">
-      <div id="peer-drawer">
-        <div id="peer-drawer-hdr">
-          <span id="peer-drawer-title">—</span>
-        </div>
-        <div id="peer-drawer-body"><div class="peer-loading">Loading…</div></div>
-      </div>
       <div class="section-hdr">MESH NODES <span id="node-count"></span></div>
       <div id="node-list"></div>
     </div>
   </div>
 </div>
-<div id="tooltip"></div>
-
 <script>
 // ── Data & State ────────────────────────────────────────────────────────────
 let DATA = null;
 let SIM  = { nodes: [], links: [], running: false, raf: null };
 let HOVER_NODE = null;
+let drawQueued = false;
+let SELECTED_PEER_ID = '';
+let LOCAL_DETAIL_HTML = '<div class="peer-loading">Loading…</div>';
+let PEER_DETAIL_CACHE = {};
+let PEER_LOADING_ID = null;
 const POLL_INTERVAL_MS = __REFRESH__;
+const THEME_KEY = 'manetUiTheme';
+
+function preferredTheme() {
+  const params = new URLSearchParams(window.location.search);
+  const forced = params.get('theme');
+  if (forced === 'dark' || forced === 'light') {
+    try { localStorage.setItem(THEME_KEY, forced); } catch(e) {}
+    return forced;
+  }
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === 'dark' || saved === 'light') return saved;
+  } catch(e) {}
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
+  document.querySelectorAll('.fer-logo-img[data-light][data-dark], .logo[data-light][data-dark]').forEach(img => {
+    img.src = theme === 'dark' ? img.dataset.dark : img.dataset.light;
+  });
+  if (window.MANET_CANVAS_READY && typeof scheduleDraw === 'function' && !SIM.running) scheduleDraw();
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem(THEME_KEY, next); } catch(e) {}
+  setTheme(next);
+}
+
+function isDarkTheme() {
+  return document.documentElement.dataset.theme === 'dark';
+}
+
+function goPerfDashboard() {
+  window.location.href = 'http://perf.local/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light');
+}
+
+setTheme(preferredTheme());
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 function tqClass(tq) {
@@ -1045,7 +1603,7 @@ function tqClass(tq) {
   return 'badge-tq-bad';
 }
 function tqColor(tq) {
-  if (tq == null) return '#334455';
+  if (tq == null) return '#9aa4b2';
   if (tq >= 200)  return '#22c55e';
   if (tq >= 130)  return '#eab308';
   if (tq >= 60)   return '#f97316';
@@ -1059,9 +1617,19 @@ function tqPct(tq) {
   if (tq == null) return 0;
   return Math.round((tq / 255) * 100);
 }
+function themeColor(light, dark) {
+  return isDarkTheme() ? dark : light;
+}
+function topoFont(weight, size) {
+  return `${weight} ${size}px Roobert, Arial, sans-serif`;
+}
 function ts(epoch) {
   const d = new Date(epoch * 1000);
   return d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+}
+
+function getLocalNodeId() {
+  return DATA && DATA.nodes ? ((DATA.nodes.find(n => n.is_me) || {}).id || '') : '';
 }
 
 // ── Node List ────────────────────────────────────────────────────────────────
@@ -1071,6 +1639,7 @@ function renderNodeList(nodes) {
   el.innerHTML = nodes.map(n => {
     const cls = [
       'node-row',
+      SELECTED_PEER_ID === n.id ? 'peer-selected' : '',
       n.is_me  ? 'is-me' : '',
       n.is_gateway ? 'is-gw' : ''
     ].filter(Boolean).join(' ');
@@ -1084,9 +1653,9 @@ function renderNodeList(nodes) {
     if (n.limp)        badges.push(`<span class="badge badge-tq-bad">LIMP</span>`);
 
     const thisNodeLabel = n.is_me
-      ? `<span style="background:var(--self);color:#fff;font-size:10px;font-weight:bold;padding:1px 7px;border-radius:3px;letter-spacing:.8px;margin-left:6px">THIS NODE</span>`
+      ? `<span class="self-node-badge">THIS NODE</span>`
       : '';
-    const tqBadge = `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
+    const tqBadge = n.is_me ? '' : `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
     const bar = `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
     const meta = n.uptime  ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
     const cpu  = n.cpu     ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
@@ -1098,21 +1667,45 @@ function renderNodeList(nodes) {
       battMeta = `<span style="color:${col};font-size:10px">${icon}${pct}%</span>`;
     }
 
+    const expanded = SELECTED_PEER_ID === n.id;
+      const detailBody = n.is_me
+        ? LOCAL_DETAIL_HTML
+        : (PEER_LOADING_ID === n.id
+            ? '<div class="peer-loading">FETCHING…</div>'
+          : (PEER_DETAIL_CACHE[n.id] || '<div class="peer-loading" style="color:var(--muted)">No details loaded</div>'));
+    const detail = expanded ? `<div class="node-inline-detail">
+      <div class="inline-detail-head">
+        <span class="inline-detail-title">${n.hostname}${n.ip ? '  ' + n.ip : ''}</span>
+        ${n.is_me ? '<span class="self-node-badge">THIS NODE</span>' : ''}
+      </div>
+      <div class="inline-detail-body">${detailBody}</div>
+    </div>` : '';
+
     return `<div class="${cls}" data-id="${n.id}">
-      <div class="node-name">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
-      <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
-      <div class="node-meta">${tqBadge}${badges.join('')}${meta}${cpu}${battMeta}</div>
-      ${bar}
+      <div class="node-summary">
+        <div class="node-name">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
+        <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
+        <div class="node-meta">${tqBadge}${badges.join('')}${meta}${cpu}${battMeta}</div>
+        ${bar}
+      </div>
+      ${detail}
     </div>`;
   }).join('');
 }
+
+function tickLocalTime() {
+  const el = document.getElementById('hdr-time');
+  if (el) el.textContent = new Date().toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+}
+setInterval(tickLocalTime, 1000);
+tickLocalTime();
 
 function updateHeader(d) {
   document.getElementById('hdr-hostname').textContent = d.my_hostname || '—';
   document.getElementById('hdr-ip').textContent       = d.my_ip      || '—';
   document.getElementById('hdr-ssid').textContent     = d.mesh_ssid  ? `▶ ${d.mesh_ssid}` : '';
   document.getElementById('hdr-nodes').textContent    = `${d.nodes.length} node${d.nodes.length!==1?'s':''}`;
-  document.getElementById('hdr-time').textContent     = ts(d.timestamp);
+  // hdr-time is kept live by tickLocalTime(), no need to override here
 
   // Gateway label: show selected gateway hostname if known, else count, else "No GW"
   const gwEl = document.getElementById('hdr-gw-label');
@@ -1160,7 +1753,7 @@ function updateHealthPill(localData) {
   } else {
     cls = 'health-ok';
     dotColor = 'var(--good)';
-    text = '● ALL OK';
+    text = 'ALL OK';
   }
 
   // Apply to pill container
@@ -1174,6 +1767,7 @@ function updateHealthPill(localData) {
 // ── Topology Simulation ───────────────────────────────────────────────────────
 const canvas = document.getElementById('topo');
 const ctx    = canvas.getContext('2d');
+window.MANET_CANVAS_READY = true;
 
 function initSim(nodes, edges) {
   const W = canvas.offsetWidth, H = canvas.offsetHeight;
@@ -1286,6 +1880,7 @@ function simStep() {
 const view = { x: 0, y: 0, scale: 1 };
 
 function drawTopo() {
+  drawQueued = false;
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.offsetWidth, H = canvas.offsetHeight;
   canvas.width  = W * dpr;
@@ -1298,10 +1893,10 @@ function drawTopo() {
 
   if (SIM.nodes.length === 0) return;
 
-  // Grid dots
-  ctx.fillStyle = '#1e304830';
-  for (let gx = 20; gx < W; gx += 30)
-    for (let gy = 20; gy < H; gy += 30)
+  // Subtle guide dots
+  ctx.fillStyle = themeColor('#d6d2cb55', '#34313b66');
+  for (let gx = 28; gx < W; gx += 38)
+    for (let gy = 28; gy < H; gy += 38)
       ctx.fillRect(gx, gy, 1, 1);
 
   // Links
@@ -1349,11 +1944,11 @@ function drawTopo() {
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
     if (tq != null && (isDirect || link.type === 'multihop')) {
       ctx.fillStyle = col + 'cc';
-      ctx.font = '9px "Courier New"';
+      ctx.font = topoFont('700', 9);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       // Small white backing for readability
-      ctx.fillStyle = '#0a0e14cc';
+      ctx.fillStyle = themeColor('#ffffffe8', '#121118e8');
       ctx.fillRect(mx - 12, my - 7, 24, 13);
       ctx.fillStyle = col + 'dd';
       ctx.fillText(`${tq}`, mx, my);
@@ -1388,10 +1983,10 @@ function drawTopo() {
   SIM.nodes.forEach(n => {
     const isHover = HOVER_NODE && HOVER_NODE.id === n.id;
     const isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID && SELECTED_PEER_ID === n.id);
-    const col = n.is_me ? '#818cf8' : (n.is_gateway ? '#f59e0b' : tqColor(n.tq));
+    const col = n.is_me ? '#ecb000' : (n.is_gateway ? '#ecb000' : tqColor(n.tq));
     const r = n.r + (isHover ? 3 : (isSelected ? 2 : 0));
 
-    // Glow — brighter for selected node
+    // Soft focus halo for selected node
     const glowR = isSelected ? r * 4.5 : r * 3;
     const grd = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, glowR);
     grd.addColorStop(0, isSelected ? col + '70' : col + '30');
@@ -1405,9 +2000,9 @@ function drawTopo() {
     // Circle
     ctx.beginPath();
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = isSelected ? col + '22' : '#0a0e14';
+    ctx.fillStyle = isSelected ? col + '18' : themeColor('#ffffff', '#121118');
     ctx.fill();
-    ctx.strokeStyle = isSelected ? '#ffffff' : col;
+    ctx.strokeStyle = isSelected ? col : col;
     ctx.lineWidth = isSelected ? 2.5 : (n.is_me ? 2.5 : (isHover ? 2 : 1.5));
     ctx.stroke();
 
@@ -1415,31 +2010,43 @@ function drawTopo() {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     if (n.is_gateway) {
-      ctx.fillStyle = n.is_selected_gw ? '#f59e0b' : '#f59e0b80';
-      ctx.font = `${Math.round(r * 0.9)}px serif`;
+      ctx.fillStyle = n.is_selected_gw ? '#ecb000' : '#ecb00080';
+      ctx.font = topoFont('700', Math.round(r * 0.9));
       ctx.fillText('★', n.x, n.y);
     } else if (n.is_me) {
-      ctx.fillStyle = '#818cf8';
-      ctx.font = `${Math.round(r)}px "Courier New"`;
+      ctx.fillStyle = '#ecb000';
+      ctx.font = topoFont('700', Math.round(r));
       ctx.fillText('◉', n.x, n.y);
     }
     // THIS NODE: small filled dot in top-right corner of circle
     if (n.is_me) {
       ctx.beginPath();
       ctx.arc(n.x + r * 0.65, n.y - r * 0.65, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#818cf8';
+      ctx.fillStyle = '#ecb000';
       ctx.fill();
-      ctx.strokeStyle = '#0a0e14';
+      ctx.strokeStyle = themeColor('#ffffff', '#02000d');
       ctx.lineWidth = 1;
       ctx.stroke();
     }
     ctx.textBaseline = 'alphabetic';
 
     // Label
-    ctx.fillStyle = isHover || isSelected ? '#ffffff' : col + 'cc';
-    ctx.font = `${isHover || isSelected ? 'bold ' : ''}11px "Courier New"`;
+    ctx.fillStyle = isHover || isSelected ? themeColor('#02000d', '#f8f6ef') : themeColor('#4a4752', '#cfc9d8');
+    ctx.font = topoFont(isHover || isSelected ? '700' : '600', 11);
     ctx.textAlign = 'center';
     ctx.fillText(n.hostname, n.x, n.y + r + 12);
+  });
+}
+
+function scheduleDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => {
+    if (!window.MANET_CANVAS_READY) {
+      drawQueued = false;
+      return;
+    }
+    drawTopo();
   });
 }
 
@@ -1464,21 +2071,6 @@ function screenToSim(sx, sy) {
   return { x: (sx - view.x) / view.scale, y: (sy - view.y) / view.scale };
 }
 
-// ── Canvas click → open peer drawer ──────────────────────────────────────────
-canvas.addEventListener('click', e => {
-  const rect = canvas.getBoundingClientRect();
-  const { x: mx, y: my } = screenToSim(e.clientX - rect.left, e.clientY - rect.top);
-  const clicked = SIM.nodes.find(n => {
-    const dx = n.x - mx, dy = n.y - my;
-    return Math.sqrt(dx*dx + dy*dy) < n.r + 12;
-  });
-  if (!clicked) return;
-  if (clicked.is_me) { showLocalInDrawer(); return; }
-  const node = DATA && DATA.nodes.find(n => n.id === clicked.id);
-  if (node) openPeerDrawer(node);
-});
-
-// ── Tooltip ───────────────────────────────────────────────────────────────────
 canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   const { x: mx, y: my } = screenToSim(e.clientX - rect.left, e.clientY - rect.top);
@@ -1486,32 +2078,13 @@ canvas.addEventListener('mousemove', e => {
     const dx = n.x - mx, dy = n.y - my;
     return Math.sqrt(dx*dx + dy*dy) < n.r + 8;
   }) || null;
-
-  const tip = document.getElementById('tooltip');
   canvas.style.cursor = HOVER_NODE ? 'pointer' : 'default';
-  if (HOVER_NODE) {
-    const n = HOVER_NODE;
-    const svcs = [n.is_gateway?'Gateway':'', n.mumble?'Mumble':'', n.mediamtx?'MediaMTX':'', n.ntp?'NTP':''].filter(Boolean);
-    tip.innerHTML = `<b style="color:var(--accent)">${n.hostname}</b><br>
-      IP: ${n.ip||'—'}<br>
-      MAC: ${n.mac}<br>
-      TQ: <b style="color:${tqColor(n.tq)}">${tqLabel(n.tq)}</b> / 255<br>
-      ${n.uptime ? `Up: ${n.uptime}<br>` : ''}
-      ${n.cpu    ? `CPU: ${n.cpu}<br>`    : ''}
-      ${svcs.length ? `Svcs: ${svcs.join(', ')}` : ''}`;
-    tip.style.display = 'block';
-    tip.style.left    = `${e.clientX + 12}px`;
-    tip.style.top     = `${e.clientY - 10}px`;
-  } else {
-    tip.style.display = 'none';
-  }
-  if (!SIM.running) drawTopo();
+  if (!SIM.running) scheduleDraw();
 });
 
 canvas.addEventListener('mouseleave', () => {
   HOVER_NODE = null;
-  document.getElementById('tooltip').style.display = 'none';
-  if (!SIM.running) drawTopo();
+  if (!SIM.running) scheduleDraw();
 });
 
 canvas.addEventListener('click', e => {
@@ -1523,14 +2096,11 @@ canvas.addEventListener('click', e => {
   });
   if (!hit) return;
   if (hit.is_me) { showLocalInDrawer(); return; }
-  const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
-  if (listRow) listRow.scrollIntoView({ block: 'nearest' });
-  openPeerDrawer(hit);
+  const node = DATA && DATA.nodes.find(n => n.id === hit.id);
+  if (node) openPeerDrawer(node);
 });
 
-// ── Touch: pinch-to-zoom + pan + node drag ────────────────────────────────────
-let dragNode = null, dragOX = 0, dragOY = 0;
-let lastPanX = 0, lastPanY = 0, isPanning = false;
+// ── Touch: two-finger pinch only (single finger always scrolls page) ────────
 let pinchDist0 = 0, pinchScale0 = 1, pinchCX = 0, pinchCY = 0;
 
 function getTouchDist(touches) {
@@ -1547,24 +2117,7 @@ function getTouchCenter(touches, rect) {
 
 canvas.addEventListener('touchstart', e => {
   const rect = canvas.getBoundingClientRect();
-  if (e.touches.length === 1) {
-    const t = e.touches[0];
-    touchStartX = t.clientX; touchStartY = t.clientY; touchStartT = Date.now();
-    const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
-    const { x: mx, y: my } = screenToSim(sx, sy);
-    dragNode = SIM.nodes.find(n => {
-      const dx = n.x - mx, dy = n.y - my;
-      return Math.sqrt(dx*dx + dy*dy) < n.r + 12;
-    }) || null;
-    if (dragNode) {
-      dragOX = mx - dragNode.x; dragOY = my - dragNode.y;
-      e.preventDefault(); // only prevent default when dragging a node
-    } else {
-      isPanning = true; lastPanX = sx; lastPanY = sy;
-      e.preventDefault(); // prevent scroll while panning canvas
-    }
-  } else if (e.touches.length === 2) {
-    dragNode = null; isPanning = false;
+  if (e.touches.length === 2) {
     pinchDist0  = getTouchDist(e.touches);
     pinchScale0 = view.scale;
     const c = getTouchCenter(e.touches, rect);
@@ -1583,57 +2136,13 @@ canvas.addEventListener('touchmove', e => {
     view.x = pinchCX - (pinchCX - view.x) * (newScale / view.scale);
     view.y = pinchCY - (pinchCY - view.y) * (newScale / view.scale);
     view.scale = newScale;
-    if (!SIM.running) drawTopo();
-    e.preventDefault();
-  } else if (e.touches.length === 1) {
-    const t = e.touches[0];
-    const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
-    if (dragNode) {
-      const { x: mx, y: my } = screenToSim(sx, sy);
-      dragNode.x = mx - dragOX; dragNode.y = my - dragOY;
-      dragNode.vx = 0; dragNode.vy = 0;
-    } else if (isPanning) {
-      view.x += sx - lastPanX; view.y += sy - lastPanY;
-      lastPanX = sx; lastPanY = sy;
-    }
-    if (!SIM.running) drawTopo();
+    if (!SIM.running) scheduleDraw();
     e.preventDefault();
   }
 }, { passive: false });
 
-let touchStartX = 0, touchStartY = 0, touchStartT = 0;
-
 canvas.addEventListener('touchend', e => {
-  if (e.touches.length < 2) { pinchDist0 = 0; }
-  if (e.touches.length === 0) {
-    const wasDraggingNode = dragNode;
-    const wasPanning = isPanning;
-    dragNode = null; isPanning = false;
-
-    // Tap detection: short time, small movement
-    const dt = Date.now() - touchStartT;
-    const ct = e.changedTouches[0];
-    const dx = ct.clientX - touchStartX, dy = ct.clientY - touchStartY;
-    const dist = Math.sqrt(dx*dx + dy*dy);
-    if (dt < 300 && dist < 12) {
-      const rect = canvas.getBoundingClientRect();
-      const sx = ct.clientX - rect.left, sy = ct.clientY - rect.top;
-      const { x: mx, y: my } = screenToSim(sx, sy);
-      const hit = SIM.nodes.find(n => {
-        const ndx = n.x - mx, ndy = n.y - my;
-        return Math.sqrt(ndx*ndx + ndy*ndy) < n.r + 14;
-      });
-      if (hit) {
-        if (hit.is_me) {
-          showLocalInDrawer();
-        } else {
-          const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
-          if (listRow) listRow.scrollIntoView({ block: 'nearest' });
-          openPeerDrawer(hit);
-        }
-      }
-    }
-  }
+  if (e.touches.length < 2) pinchDist0 = 0;
 });
 
 // ── Panel drag-to-resize (mobile) ────────────────────────────────────────────
@@ -1653,7 +2162,7 @@ canvas.addEventListener('touchend', e => {
     const mainH  = main.getBoundingClientRect().height;
     const newH   = Math.min(Math.max(startH + (y - startY), 80), mainH - 60);
     document.documentElement.style.setProperty('--topo-h', newH + 'px');
-    if (!SIM.running) drawTopo();
+    if (!SIM.running) scheduleDraw();
   }
   function onEnd() {
     dragging = false;
@@ -1670,7 +2179,7 @@ canvas.addEventListener('touchend', e => {
 
 // ── Resize ────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
-  if (!SIM.running) drawTopo();
+  if (!SIM.running) scheduleDraw();
 });
 
 function battColor(pct) {
@@ -1680,8 +2189,6 @@ function battColor(pct) {
 }
 
 function renderLocalPanel(d) {
-  const el = document.getElementById('peer-drawer-body');
-
   // ── Identity rows ──
   let html = '';
 
@@ -1792,7 +2299,7 @@ function renderLocalPanel(d) {
   }
   html += `</div>`;
 
-  el.innerHTML = html;
+  return html;
 }
 
 async function fetchLocal() {
@@ -1801,14 +2308,11 @@ async function fetchLocal() {
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
     updateHealthPill(d);
-    if (SELECTED_PEER_ID === null) {
-      document.getElementById('peer-drawer-title').textContent =
-        (d.hostname || '—') + (d.ip ? '  ' + d.ip : '') + '  ★ THIS NODE';
-      renderLocalPanel(d);
-    }
+    LOCAL_DETAIL_HTML = renderLocalPanel(d);
+    if (DATA) renderNodeList(DATA.nodes);
   } catch (err) {
-    if (SELECTED_PEER_ID === null)
-      document.getElementById('peer-drawer-body').textContent = `Error: ${err.message}`;
+    LOCAL_DETAIL_HTML = `<div class="peer-loading" style="color:var(--bad)">Error: ${err.message}</div>`;
+    if (DATA) renderNodeList(DATA.nodes);
   }
 }
 
@@ -1831,9 +2335,12 @@ fetchData();
 fetchLocal();
 setInterval(fetchData, POLL_INTERVAL_MS);
 setInterval(fetchLocal, POLL_INTERVAL_MS);
-
-// ── Peer Detail Drawer ────────────────────────────────────────────────────────
-let SELECTED_PEER_ID = null;
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    fetchData();
+    fetchLocal();
+  }
+});
 
 document.getElementById('node-list').addEventListener('click', e => {
   const row = e.target.closest('.node-row');
@@ -1842,41 +2349,65 @@ document.getElementById('node-list').addEventListener('click', e => {
   if (!id || !DATA) return;
   const node = DATA.nodes.find(n => n.id === id);
   if (!node) return;
+  if (SELECTED_PEER_ID === id) {
+    collapseNodeDetail();
+    return;
+  }
   if (node.is_me) { showLocalInDrawer(); return; }
   openPeerDrawer(node);
 });
 
+function collapseNodeDetail() {
+  SELECTED_PEER_ID = '';
+  PEER_LOADING_ID = null;
+  if (DATA) renderNodeList(DATA.nodes);
+  if (!SIM.running) drawTopo();
+}
+
 function openPeerDrawer(node) {
   SELECTED_PEER_ID = node.id;
-  document.querySelectorAll('.node-row').forEach(r => r.classList.toggle('peer-selected', r.dataset.id === node.id));
-  document.getElementById('peer-drawer-title').textContent = node.hostname + (node.ip ? '  ' + node.ip : '');
-  document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading">FETCHING…</div>';
-  document.getElementById('side-panel').scrollTop = 0;
+  PEER_LOADING_ID = node.id;
+  if (DATA) renderNodeList(DATA.nodes);
+  const listRow = document.querySelector(`#node-list .node-row[data-id="${node.id}"]`);
+  if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   if (!SIM.running) drawTopo();
   if (!node.ip) {
-    document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
+    PEER_DETAIL_CACHE[node.id] = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
+    PEER_LOADING_ID = null;
+    if (DATA) renderNodeList(DATA.nodes);
     return;
   }
   fetchPeer(node.ip, node.hostname);
 }
 
 function showLocalInDrawer() {
-  SELECTED_PEER_ID = null;
-  document.querySelectorAll('.node-row').forEach(r => r.classList.remove('peer-selected'));
-  document.getElementById('side-panel').scrollTop = 0;
+  const localId = getLocalNodeId();
+  if (!localId) return;
+  SELECTED_PEER_ID = localId;
+  PEER_LOADING_ID = null;
+  if (DATA) renderNodeList(DATA.nodes);
+  const listRow = document.querySelector(`#node-list .node-row[data-id="${localId}"]`);
+  if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   if (!SIM.running) drawTopo();
   fetchLocal();
 }
 
 async function fetchPeer(ip, hostname) {
+  const node = DATA && DATA.nodes
+    ? (DATA.nodes.find(n => n.ip === ip && n.hostname === hostname) || DATA.nodes.find(n => n.ip === ip))
+    : null;
+  const nodeId = node ? node.id : null;
   try {
     const r = await fetch('/api/peer/' + ip);
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || r.status);
-    renderPeerDrawer(d, hostname);
+    if (nodeId) PEER_DETAIL_CACHE[nodeId] = renderPeerDrawer(d, hostname);
   } catch (err) {
-    document.getElementById('peer-drawer-body').innerHTML =
+    if (nodeId) PEER_DETAIL_CACHE[nodeId] =
       '<div class="peer-loading" style="color:var(--bad)">Error: ' + err.message + '</div>';
+  } finally {
+    if (nodeId === PEER_LOADING_ID) PEER_LOADING_ID = null;
+    if (DATA) renderNodeList(DATA.nodes);
   }
 }
 
@@ -1959,7 +2490,7 @@ function renderPeerDrawer(d, hostname) {
   }
   html += `</div>`;
 
-  document.getElementById('peer-drawer-body').innerHTML = html;
+  return html;
 }
 </script>
 </body>
@@ -2003,7 +2534,6 @@ def save_pending_config(pkg):
 
 def clear_pending_config():
     try:
-        import os
         os.remove(PENDING_CONFIG_FILE)
     except Exception:
         pass
@@ -2066,19 +2596,19 @@ body { overflow-y: auto; }
 /* ── Admin layout ── */
 .admin-body { display: flex; gap: 0; height: calc(100vh - 34px); overflow: hidden; }
 .admin-form-col { flex: 1; overflow-y: auto; padding: 20px 24px; border-right: 1px solid var(--border); }
-.admin-status-col { width: 320px; flex-shrink: 0; overflow-y: auto; padding: 16px; background: #080c12; }
-.admin-col-hdr { font-size: 9px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase;
+.admin-status-col { width: 320px; flex-shrink: 0; overflow-y: auto; padding: 16px; background: #ffffff; }
+.admin-col-hdr { font-size: 11px; color: var(--muted); font-weight: 800; letter-spacing: 0; text-transform: none;
                  padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
 /* Section styling */
 .cfg-section { margin-bottom: 22px; }
-.cfg-section-title { font-size: 10px; color: var(--accent); letter-spacing: 1.5px; text-transform: uppercase;
+.cfg-section-title { font-size: 12px; color: var(--text); font-weight: 800; letter-spacing: 0; text-transform: none;
                       padding: 0 0 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
 .cfg-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
 .cfg-row label { flex: 0 0 180px; font-size: 11px; color: var(--muted); padding-top: 6px; }
-.cfg-row .hint { display: block; font-size: 9px; color: #4a5568; margin-top: 2px; }
+.cfg-row .hint { display: block; font-size: 9px; color: var(--muted); margin-top: 2px; }
 .cfg-row input[type=text], .cfg-row input[type=password], .cfg-row select {
-  flex: 1; background: #111827; border: 1px solid var(--border); border-radius: 3px;
-  color: var(--text); font-family: "Courier New", monospace; font-size: 12px;
+  flex: 1; background: #ffffff; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font-family: var(--font); font-size: 12px;
   padding: 5px 8px; outline: none; }
 .cfg-row input:focus, .cfg-row select:focus { border-color: var(--accent); }
 .cfg-row input[type=checkbox] { width: 16px; height: 16px; margin-top: 6px; accent-color: var(--accent); }
@@ -2088,32 +2618,38 @@ body { overflow-y: auto; }
                 margin-left: 6px; vertical-align: middle; letter-spacing: .5px; }
 /* Action buttons */
 .admin-actions { display: flex; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
-.btn { padding: 8px 18px; border-radius: 3px; font-size: 11px; font-weight: bold; letter-spacing: 1px;
-       font-family: "Courier New", monospace; cursor: pointer; border: none; text-transform: uppercase; }
-.btn-stage  { background: #00b4d820; color: var(--accent); border: 1px solid #00b4d840; }
-.btn-stage:hover:not(:disabled)  { background: #00b4d830; }
-.btn-apply  { background: #22c55e20; color: var(--good);   border: 1px solid #22c55e40; }
-.btn-apply:hover:not(:disabled)  { background: #22c55e30; }
-.btn-force  { background: #f9731620; color: var(--warn);   border: 1px solid #f9731640; }
-.btn-force:hover:not(:disabled)  { background: #f9731630; }
-.btn-cancel { background: #ef444420; color: var(--bad);    border: 1px solid #ef444440; }
-.btn-cancel:hover:not(:disabled) { background: #ef444430; }
+.btn { padding: 9px 16px; border-radius: 8px; font-size: 12px; font-weight: 850; letter-spacing: 0;
+       font-family: var(--font); cursor: pointer; border: 1px solid var(--accent); text-transform: none; background:var(--surface); color:var(--accent); transition:all .15s; }
+.btn-stage  { background: var(--surface); color: var(--accent); border-color: var(--accent); }
+.btn-stage:hover:not(:disabled)  { background: var(--accent); color: #ffffff; }
+.btn-apply  { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
+.btn-apply:hover:not(:disabled)  { background: var(--fer-black); color: #ffffff; border-color: var(--fer-black); }
+.btn-force  { background: rgba(236,176,0,.10); color: var(--text); border-color: rgba(236,176,0,.48); }
+.btn-force:hover:not(:disabled)  { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
+.btn-cancel { background: transparent; color: #b42318; border-color: #e9b2ad; }
+.btn-cancel:hover:not(:disabled) { background: #b42318; color: #ffffff; border-color: #b42318; }
+:root[data-theme="dark"] .btn-stage { background: transparent; color: var(--accent2); border-color: var(--accent2); }
+:root[data-theme="dark"] .btn-stage:hover:not(:disabled), :root[data-theme="dark"] .btn-apply:hover:not(:disabled), :root[data-theme="dark"] .btn-force:hover:not(:disabled) { background:#f8f6ef; color:var(--fer-black); border-color:#f8f6ef; }
+:root[data-theme="dark"] .btn-apply { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
+:root[data-theme="dark"] .btn-force { background: rgba(236,176,0,.10); color: var(--accent2); border-color: rgba(236,176,0,.48); }
+:root[data-theme="dark"] .btn-cancel { color:#fca5a5; border-color:#7f1d1d; }
+:root[data-theme="dark"] .btn-cancel:hover:not(:disabled) { background:#b42318; color:#ffffff; border-color:#b42318; }
 .btn:disabled { opacity: 0.35; cursor: not-allowed; }
 /* Status column — node ACK table */
 .ack-table { width: 100%; border-collapse: collapse; }
 .ack-table th { font-size: 9px; color: var(--muted); text-align: left; padding: 4px 6px;
                 letter-spacing: .8px; text-transform: uppercase; border-bottom: 1px solid var(--border); }
-.ack-table td { font-size: 11px; padding: 5px 6px; border-bottom: 1px solid #1e304820; }
+.ack-table td { font-size: 11px; padding: 6px; border-bottom: 1px solid #edf0f4; }
 .ack-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
-.ack-dot-yes  { background: var(--good); box-shadow: 0 0 4px var(--good); }
+.ack-dot-yes  { background: var(--good); }
 .ack-dot-no   { background: var(--muted); }
 .ack-dot-self { background: var(--accent); }
 /* Pending config info box */
-.pending-box { background: #111827; border: 1px solid var(--border); border-radius: 4px;
+.pending-box { background: #f8fafc; border: 1px solid var(--border); border-radius: 8px;
                padding: 10px 12px; margin-bottom: 14px; }
 .pending-box.pending-active { border-color: #f59e0b40; background: #f59e0b08; }
 .pending-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-.pending-version { font-size: 12px; font-family: "Courier New",monospace; color: var(--accent); }
+.pending-version { font-size: 12px; font-family: var(--font); font-weight: 800; color: var(--accent); }
 .pending-stat { font-size: 10px; color: var(--muted); margin-top: 4px; }
 .pending-stat span { color: var(--text); }
 /* Progress bar */
@@ -2557,6 +3093,221 @@ def render_status_page():
     html = html.replace('__REFRESH__', str(REFRESH_MS))
     return html
 
+def send_file_response(handler, path, content_type):
+    try:
+        with open(path, 'rb') as f:
+            body = f.read()
+    except FileNotFoundError:
+        handler.send_response(404)
+        handler.end_headers()
+        handler.wfile.write(b'Not found')
+        return
+    handler.send_response(200)
+    handler.send_header('Content-Type', content_type)
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Cache-Control', 'public, max-age=3600')
+    handler.end_headers()
+    handler.wfile.write(body)
+
+def render_perf_auth_page(next_path='/', error=''):
+    safe_next = html.escape(next_path, quote=True)
+    safe_error = html.escape(error)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>perf.local login</title>
+<script>
+(() => {{
+  const key = 'manetUiTheme';
+  const params = new URLSearchParams(window.location.search);
+  const forced = params.get('theme');
+  let theme = (forced === 'dark' || forced === 'light') ? forced : null;
+  if (!theme) {{
+    try {{
+      const saved = localStorage.getItem(key);
+      if (saved === 'dark' || saved === 'light') theme = saved;
+    }} catch (e) {{}}
+  }}
+  if (!theme && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) theme = 'dark';
+  if (!theme) theme = 'light';
+  document.documentElement.dataset.theme = theme;
+  try {{ localStorage.setItem(key, theme); }} catch (e) {{}}
+}})();
+</script>
+<style>
+@keyframes autofill-detect {{ from {{ opacity: 1; }} to {{ opacity: 1; }} }}
+body {{
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at top left, rgba(236,176,0,.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(2,0,13,.08), transparent 26%),
+    #ebeae8;
+  color: #02000d;
+  font-family: Roobert, Arial, sans-serif;
+}}
+.wrap {{
+  width: min(460px, calc(100vw - 28px));
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-height: calc(100svh - 36px);
+  background: rgba(255,255,255,.94);
+  border: 1px solid #e7e2da;
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(2,0,13,.12);
+  overflow: auto;
+}}
+.top {{
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid #e7e2da;
+  background: transparent;
+  text-align: center;
+}}
+.logo {{
+  width: min(260px, 72vw);
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+  filter: none;
+}}
+h1 {{ margin: 14px 0 4px; font-size: 18px; }}
+p  {{ margin: 0; font-size: 13px; color: #615f68; }}
+form {{ padding: 18px 20px 20px; display: grid; gap: 12px; }}
+label {{ font-size: 12px; font-weight: 700; color: #02000d; }}
+.sr-only {{
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}}
+input {{
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d6d2cb;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  color: #02000d;
+  background: #ffffff;
+  animation: autofill-detect 0s both;
+}}
+input:focus {{
+  outline: none;
+  border-color: #ecb000;
+  box-shadow: 0 0 0 3px rgba(236,176,0,.18);
+}}
+button {{
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #ecb000;
+  background: #ecb000;
+  color: #02000d;
+  border-radius: 999px;
+  padding: 10px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}}
+.err {{
+  min-height: 18px;
+  color: #b42318;
+  font-size: 12px;
+}}
+:root[data-theme="dark"] body {{
+  background:
+    radial-gradient(circle at top left, rgba(236,176,0,.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(255,255,255,.08), transparent 26%),
+    #02000d;
+  color: #f8f6ef;
+}}
+:root[data-theme="dark"] .wrap {{
+  background: rgba(18,17,24,.94);
+  border-color: #24212b;
+  box-shadow: 0 24px 60px rgba(0,0,0,.34);
+}}
+:root[data-theme="dark"] .top {{
+  border-bottom-color: #24212b;
+  background: transparent;
+}}
+:root[data-theme="dark"] .logo {{
+  filter: brightness(0) invert(1);
+}}
+:root[data-theme="dark"] p {{
+  color: #aaa5b2;
+}}
+:root[data-theme="dark"] label {{
+  color: #f8f6ef;
+}}
+:root[data-theme="dark"] input {{
+  border-color: #34313b;
+  color: #f8f6ef;
+  background: #121118;
+}}
+:root[data-theme="dark"] button {{
+  border-color: #ecb000;
+  background: #ecb000;
+  color: #02000d;
+}}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <img class="logo" src="/assets/fer-logo.svg" data-light="/assets/fer-logo.svg" data-dark="/assets/fer-logo.svg" alt="FER">
+      <h1>perf.local</h1>
+      <p>Enter the provisioned management password to continue.</p>
+    </div>
+    <form id="perf-login-form" method="post" action="/auth/perf-login" autocomplete="on">
+      <input type="hidden" name="next" value="{safe_next}">
+      <label class="sr-only" for="username">Username</label>
+      <input class="sr-only" id="username" name="username" type="text" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true">
+      <label for="password">Management password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
+      <div class="err">{safe_error}</div>
+      <button type="submit">Login</button>
+    </form>
+  </div>
+  <script>
+    (() => {{
+      const form = document.getElementById('perf-login-form');
+      const password = document.getElementById('password');
+      if (!form || !password) return;
+      let submitted = false;
+      const trySubmit = () => {{
+        if (submitted) return;
+        if (!password.value) return;
+        if (!(password.matches(':-webkit-autofill, :autofill') || document.activeElement === password)) return;
+        submitted = true;
+        requestAnimationFrame(() => form.requestSubmit());
+      }};
+      password.addEventListener('animationstart', trySubmit);
+      password.addEventListener('input', trySubmit);
+      password.addEventListener('change', trySubmit);
+      password.addEventListener('blur', trySubmit);
+      setTimeout(trySubmit, 200);
+      setTimeout(trySubmit, 800);
+      setTimeout(trySubmit, 1400);
+    }})();
+  </script>
+</body>
+</html>"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP Handler
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2571,13 +3322,6 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/plain')
         self.end_headers()
         self.wfile.write(b'Forbidden')
-
-    def send_401(self, realm='MANET Admin'):
-        self.send_response(401)
-        self.send_header('WWW-Authenticate', f'Basic realm="{realm}"')
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'Unauthorized')
 
     def send_html(self, body):
         encoded = body.encode('utf-8')
@@ -2597,17 +3341,120 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def read_json_body(self):
+        length = int(self.headers.get('Content-Length', '0') or '0')
+        raw = self.rfile.read(length) if length else b'{}'
+        return json.loads(raw.decode('utf-8') or '{}')
+
+    def read_form_body(self):
+        length = int(self.headers.get('Content-Length', '0') or '0')
+        raw = self.rfile.read(length) if length else b''
+        return parse_qs(raw.decode('utf-8'), keep_blank_values=True)
+
+    def _perf_cookie_valid(self):
+        cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+        return is_valid_perf_auth_token(cookies.get(PERF_AUTH_COOKIE, ''))
+
+    def _send_perf_cookie_redirect(self, target_path, token):
+        target_path = normalize_local_redirect(target_path)
+        self.send_response(303)
+        self.send_header('Location', target_path or '/')
+        self.send_header('Set-Cookie', f'{PERF_AUTH_COOKIE}={token}; Path=/; Max-Age={PERF_AUTH_COOKIE_MAX_AGE}; SameSite=Lax')
+        self.end_headers()
+
+    def _send_perf_auth_required(self, next_path='/', error=''):
+        next_path = normalize_local_redirect(next_path)
+        body = render_perf_auth_page(next_path=next_path, error=error).encode('utf-8')
+        self.send_response(401)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_perf_logout_redirect(self):
+        self.send_response(303)
+        self.send_header('Location', '/auth/perf-login')
+        self.send_header('Set-Cookie', f'{PERF_AUTH_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax')
+        self.end_headers()
+
+    def _proxy_to_perf(self):
+        import urllib.request as _ur
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        supplied = query.get('perf_token', [''])[0]
+        if supplied and is_valid_perf_auth_token(supplied):
+            clean_q = [(k, v) for k, values in query.items() if k != 'perf_token' for v in values]
+            clean_query = '&'.join(
+                f'{k}={quote(v, safe="")}' if v != '' else k
+                for k, v in clean_q
+            )
+            clean_path = parsed.path or '/'
+            if clean_query:
+                clean_path += '?' + clean_query
+            self._send_perf_cookie_redirect(clean_path, supplied)
+            return
+        if not self._perf_cookie_valid():
+            next_path = parsed.path or '/'
+            if parsed.query:
+                next_path += '?' + parsed.query
+            self._send_perf_auth_required(next_path=next_path)
+            return
+        target = 'http://127.0.0.1:8081' + self.path
+        req = _ur.Request(target, method=self.command)
+        for k, v in self.headers.items():
+            if k.lower() not in ('host', 'content-length', 'cookie'):
+                req.add_header(k, v)
+        length = int(self.headers.get('Content-Length', 0))
+        data = self.rfile.read(length) if length else None
+        if data:
+            req.data = data
+            req.add_header('Content-Length', str(len(data)))
+        try:
+            with _ur.urlopen(req, timeout=120) as resp:
+                self.send_response(resp.status)
+                for k, v in resp.headers.items():
+                    if k.lower() not in ('transfer-encoding',):
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(resp.read())
+        except Exception as e:
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
+    def _is_perf_host(self):
+        host = self.headers.get('Host', '').split(':')[0].lower()
+        return host == 'perf.local' or host == 'perf'
+
     def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/assets/fer-logo.svg':
+            send_file_response(self, FER_LOGO_FULL_FILE, 'image/svg+xml')
+            return
+        if parsed.path == '/assets/fer-logo-black.svg':
+            send_file_response(self, FER_LOGO_BLACK_FILE, 'image/svg+xml')
+            return
+        if parsed.path == '/assets/fer-logo-white.svg':
+            send_file_response(self, FER_LOGO_WHITE_FILE, 'image/svg+xml')
+            return
+        if self._is_perf_host():
+            if parsed.path == '/auth/perf-logout':
+                self._send_perf_logout_redirect()
+                return
+            if parsed.path == '/auth/perf-login':
+                next_path = parse_qs(parsed.query).get('next', ['/'])[0]
+                self._send_perf_auth_required(next_path=next_path)
+                return
+            self._proxy_to_perf()
+            return
+
         conf       = load_kv_file(MESH_CONF_FILE)
         client_ip  = self.client_address[0]
-        parsed     = urlparse(self.path)
         path       = parsed.path.rstrip('/') or '/'
 
-        # Admin page — auth required, no IP restriction
+        # Admin page — no Basic auth
         if path == '/admin':
-            if not check_admin_auth(self, conf):
-                self.send_401()
-                return
             self.send_html(render_admin_page())
             return
 
@@ -2686,9 +3533,6 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(str(e).encode())
         elif path == '/api/admin/status':
-            if not check_admin_auth(self, conf):
-                self.send_401()
-                return
             try:
                 data = assemble_admin_status()
                 data['my_hostname'] = get_my_hostname()
@@ -2703,16 +3547,62 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'Not found')
 
+    def do_DELETE(self):
+        if self._is_perf_host():
+            self._proxy_to_perf()
+            return
+
+        self.send_response(404)
+        self.end_headers()
+        self.wfile.write(b'Not found')
+
     def do_POST(self):
+        if self._is_perf_host():
+            parsed = urlparse(self.path)
+            if parsed.path == '/auth/perf-login':
+                form = self.read_form_body()
+                password = (form.get('password', [''])[0] or '').strip()
+                next_path = normalize_local_redirect((form.get('next', ['/'])[0] or '/').strip())
+                conf = load_kv_file(MESH_CONF_FILE)
+                if password and password == get_provisioned_manage_password(conf):
+                    self._send_perf_cookie_redirect(next_path, get_perf_auth_token())
+                else:
+                    self._send_perf_auth_required(next_path=next_path, error='Wrong management password')
+                return
+            self._proxy_to_perf()
+            return
+
         conf      = load_kv_file(MESH_CONF_FILE)
+        client_ip = self.client_address[0]
         parsed    = urlparse(self.path)
         path      = parsed.path.rstrip('/') or '/'
         length    = int(self.headers.get('Content-Length', 0))
         body      = self.rfile.read(length) if length else b'{}'
 
-        # All POST endpoints require admin auth
-        if not check_admin_auth(self, conf):
-            self.send_401()
+        # Runtime control endpoints are called server-to-server by perf-dashboard,
+        # so restrict them to localhost/mesh IPs. Admin POSTs are intentionally
+        # not protected by Basic auth for the local field UI.
+        if path in CONTROL_POST_PATHS:
+            if not is_allowed_ip(client_ip, conf):
+                self.send_403()
+                return
+
+        if path == '/api/perf-auth':
+            if not is_allowed_ip(client_ip, conf):
+                self.send_403()
+                return
+            try:
+                req = json.loads(body)
+            except Exception:
+                req = {}
+            password = str(req.get('password', '')).strip()
+            if password and password == get_provisioned_manage_password(conf):
+                self.send_json({'ok': True, 'token': get_perf_auth_token()})
+            else:
+                self.send_response(401)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': 'Wrong management password'}).encode('utf-8'))
             return
 
         if path == '/api/admin/stage':
@@ -2796,11 +3686,275 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 clear_pending_config()
                 # Clear local ACK state
                 try:
-                    import os
                     os.remove('/var/run/mesh_config_ack_version')
                 except Exception:
                     pass
                 self.send_json({'ok': True})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/control/interface':
+            try:
+                req   = json.loads(body)
+                iface = req.get('iface', '')
+                state = req.get('state', '')  # 'up' or 'down'
+                if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
+                    self.send_json({'ok': False, 'error': 'Invalid iface or state'})
+                    return
+                # Detect HaLow (morse_usb) — requires wpa_supplicant-s1g lifecycle
+                et = subprocess.run(['ethtool', '-i', iface], capture_output=True, text=True, timeout=3)
+                is_halow = any('morse' in l for l in et.stdout.splitlines() if l.startswith('driver:'))
+                if is_halow:
+                    svc = f'wpa_supplicant-s1g-{iface}.service'
+                    if state == 'down':
+                        subprocess.run(['systemctl', 'stop', svc], timeout=15)
+                        subprocess.run(['ip', 'link', 'set', iface, 'down'], timeout=5)
+                    else:
+                        # cfg80211 regulatory must be set before wpa_supplicant_s1g starts.
+                        # Restarting wpa_supplicant for a standard iface re-asserts country=EU.
+                        for std_svc in ('wpa_supplicant@wlan0.service', 'wpa_supplicant@wlan1.service'):
+                            r = subprocess.run(['systemctl', 'is-active', std_svc],
+                                               capture_output=True, text=True, timeout=3)
+                            if r.stdout.strip() == 'active':
+                                subprocess.run(['systemctl', 'restart', std_svc], timeout=15)
+                                import time; time.sleep(3)
+                                break
+                        subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
+                        subprocess.run(['systemctl', 'start', svc], timeout=15)
+                        bat_r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
+                        if not any(l.startswith(iface + ':') for l in bat_r.stdout.splitlines()):
+                            subprocess.run(['batctl', 'if', 'add', iface], timeout=10)
+                else:
+                    svc = f'wpa_supplicant@{iface}.service'
+                    if state == 'down':
+                        subprocess.run(['batctl', 'if', 'del', iface], timeout=10)
+                        subprocess.run(['systemctl', 'stop', svc], timeout=15)
+                        subprocess.run(['ip', 'link', 'set', iface, 'down'], timeout=5)
+                    else:
+                        subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
+                        subprocess.run(['systemctl', 'start', svc], timeout=15)
+                        bat_r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
+                        if not any(l.startswith(iface + ':') for l in bat_r.stdout.splitlines()):
+                            subprocess.run(['batctl', 'if', 'add', iface], timeout=10)
+                self.send_json({'ok': True, 'iface': iface, 'state': state})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/control/txpower':
+            try:
+                req   = json.loads(body)
+                iface = req.get('iface', '')
+                dbm   = req.get('dbm')   # integer dBm
+                if not iface or dbm is None:
+                    self.send_json({'ok': False, 'error': 'Missing iface or dbm'})
+                    return
+                requested = _fmt_dbm(dbm)
+                cap = get_iface_txpower_cap(iface)
+                if cap and float(requested) > float(cap):
+                    self.send_json({
+                        'ok': False,
+                        'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap} dBm)',
+                        'options': txpower_choices_from_cap(cap),
+                    })
+                    return
+                mbm = int(float(dbm) * 100)
+                subprocess.run(
+                    ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(mbm)],
+                    capture_output=True, text=True, check=True, timeout=5
+                )
+                self.send_json({
+                    'ok': True,
+                    'iface': iface,
+                    'dbm': requested,
+                    'cap': cap,
+                    'options': txpower_choices_from_cap(cap) if cap else [],
+                })
+            except subprocess.CalledProcessError as e:
+                err = (e.stderr or e.stdout or str(e)).strip()
+                self.send_json({'ok': False, 'error': err or str(e)})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/control/halow_channel':
+            try:
+                req     = json.loads(body)
+                channel = req.get('channel')
+                bw      = req.get('bw', '1MHz')
+                dbm     = req.get('dbm')
+                if not channel:
+                    self.send_json({'ok': False, 'error': 'Missing channel'})
+                    return
+                channel = int(channel)
+                # EU S1G channel index → centre frequency in kHz
+                eu_s1g_freq_khz = {1: 863500, 2: 864500, 3: 865500,
+                                   4: 866500, 5: 867500, 6: 868500}
+                freq_khz = eu_s1g_freq_khz.get(channel)
+                if not freq_khz:
+                    self.send_json({'ok': False, 'error': f'Invalid EU S1G channel {channel}'})
+                    return
+                bw_mhz = int(str(bw).replace('MHz', ''))
+                # s1g_prim_chwidth: 0=1MHz primary, 1=2MHz primary
+                # For 4MHz operation, primary channel is 2MHz → chwidth=1
+                chwidth = {1: 0, 2: 1, 4: 1}.get(bw_mhz, 0)
+                # Write override flag so channel-election.sh doesn't overwrite
+                with open('/var/run/halow-channel-override', 'w') as f:
+                    f.write(f'{channel},{bw}')
+                # Update wpa_supplicant conf for persistence across reboots
+                wpa_conf = '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf'
+                with open(wpa_conf) as f:
+                    content = f.read()
+                content = re.sub(r'(channel\s*=\s*)\d+', rf'\g<1>{channel}', content)
+                content = re.sub(r'(s1g_prim_chwidth\s*=\s*)\d+', rf'\g<1>{chwidth}', content)
+                with open(wpa_conf, 'w') as f:
+                    f.write(content)
+                # Apply immediately via morse_cli (needs root; mesh-status runs as root)
+                morse_result = subprocess.run(
+                    ['morse_cli', '-i', 'wlan2', 'channel',
+                     '-c', str(freq_khz), '-o', str(bw_mhz), '-p', str(bw_mhz)],
+                    capture_output=True, text=True, timeout=10
+                )
+                if morse_result.returncode != 0:
+                    # Fall back to wpa_supplicant restart if morse_cli fails
+                    subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g-wlan2.service'],
+                                   timeout=15)
+                if dbm is not None:
+                    cap = get_halow_bw_txpower_cap(bw) or get_iface_txpower_cap('wlan2')
+                    requested = _fmt_dbm(dbm)
+                    if cap and float(requested) > float(cap):
+                        self.send_json({
+                            'ok': False,
+                            'error': f'Unsupported txpower {requested} dBm for wlan2 (max {cap} dBm)',
+                            'options': txpower_choices_from_cap(cap),
+                        })
+                        return
+                    subprocess.run(
+                        ['iw', 'dev', 'wlan2', 'set', 'txpower', 'fixed', str(int(float(dbm) * 100))],
+                        capture_output=True, text=True, check=True, timeout=5
+                    )
+                self.send_json({'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw, 'dbm': _fmt_dbm(dbm) if dbm is not None else ''})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/control/wifi_channel':
+            try:
+                req     = json.loads(body)
+                iface   = req.get('interface', req.get('iface', ''))
+                channel = req.get('channel')
+                dbm     = req.get('dbm')
+                if iface not in ('wlan0', 'wlan1'):
+                    self.send_json({'ok': False, 'error': 'Invalid Wi-Fi interface'})
+                    return
+                freq = wifi_channel_to_freq(iface, channel)
+                if not freq:
+                    self.send_json({'ok': False, 'error': f'Invalid channel {channel} for {iface}'})
+                    return
+
+                conf_path = f'/etc/wpa_supplicant/wpa_supplicant-{iface}.conf'
+                if not os.path.exists(conf_path):
+                    self.send_json({'ok': False, 'error': f'Missing {conf_path}'})
+                    return
+                with open(conf_path) as f:
+                    content = f.read()
+                if re.search(r'frequency=\d+', content):
+                    content = re.sub(r'frequency=\d+', f'frequency={freq}', content)
+                else:
+                    content = re.sub(r'(network=\{\n)', rf'\1    frequency={freq}\n', content, count=1)
+                with open(conf_path, 'w') as f:
+                    f.write(content)
+
+                subprocess.run(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'],
+                               check=True, timeout=15)
+                if dbm is not None:
+                    cap = get_iface_txpower_cap(iface)
+                    requested = _fmt_dbm(dbm)
+                    if cap and float(requested) > float(cap):
+                        self.send_json({
+                            'ok': False,
+                            'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap} dBm)',
+                            'options': txpower_choices_from_cap(cap),
+                        })
+                        return
+                    subprocess.run(
+                        ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(int(float(dbm) * 100))],
+                        capture_output=True, text=True, check=True, timeout=5
+                    )
+                self.send_json({'ok': True, 'iface': iface, 'channel': channel, 'frequency': freq, 'dbm': _fmt_dbm(dbm) if dbm is not None else ''})
+            except subprocess.CalledProcessError as e:
+                self.send_json({'ok': False, 'error': str(e)})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/iperf/server/start':
+            try:
+                subprocess.run(['pkill', '-f', 'iperf3 -s'], capture_output=True)
+                subprocess.Popen(['iperf3', '-s', '--one-off', '-J',
+                                  '--logfile', '/tmp/iperf3-server.log'])
+                self.send_json({'ok': True})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/iperf/server/stop':
+            try:
+                subprocess.run(['pkill', '-f', 'iperf3 -s'], capture_output=True)
+                self.send_json({'ok': True})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/iperf/client/run':
+            try:
+                req        = json.loads(body)
+                server_ip  = req.get('server_ip', '')
+                test_type  = req.get('test_type', 'tcp_1stream')
+                duration   = int(req.get('duration', 30))
+                bitrate    = req.get('bitrate', '4M')
+                parallel   = int(req.get('parallel', 1))
+                reverse    = bool(req.get('reverse', False))
+
+                cmd = ['iperf3', '-c', server_ip, '-t', str(duration), '-J']
+                if test_type in ('udp_throughput', 'udp_jitter', 'packet_loss'):
+                    cmd += ['-u', '-b', bitrate]
+                if parallel > 1:
+                    cmd += ['-P', str(parallel)]
+                if reverse:
+                    cmd += ['-R']
+
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 15)
+                try:
+                    result = json.loads(r.stdout)
+                except Exception:
+                    result = {'raw': r.stdout, 'stderr': r.stderr}
+                if result.get('error'):
+                    self.send_json({'ok': False, 'error': result.get('error'), 'result': result})
+                else:
+                    self.send_json({'ok': r.returncode == 0, 'error': r.stderr.strip(), 'result': result})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/ping/run':
+            try:
+                req    = json.loads(body)
+                target = req.get('target', '')
+                count  = int(req.get('count', 100))
+                interval = float(req.get('interval', 0.2))
+                if not target:
+                    self.send_json({'ok': False, 'error': 'Missing target'})
+                    return
+                r = subprocess.run(
+                    ['ping', '-c', str(count), '-i', str(interval), target],
+                    capture_output=True, text=True, timeout=count * interval + 10
+                )
+                # Parse ping summary line
+                rtt_match  = re.search(r'rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)', r.stdout)
+                loss_match = re.search(r'(\d+)% packet loss', r.stdout)
+                result = {
+                    'output':   r.stdout,
+                    'rtt_min':  float(rtt_match.group(1)) if rtt_match else None,
+                    'rtt_avg':  float(rtt_match.group(2)) if rtt_match else None,
+                    'rtt_max':  float(rtt_match.group(3)) if rtt_match else None,
+                    'rtt_mdev': float(rtt_match.group(4)) if rtt_match else None,
+                    'loss_pct': int(loss_match.group(1))  if loss_match else None,
+                }
+                self.send_json({'ok': True, 'result': result})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -2822,7 +3976,7 @@ if __name__ == '__main__':
     server = ThreadedServer(('0.0.0.0', port), MeshHandler)
     print(f'MANET Status Server listening on port {port}')
     print(f'  Status:  http://localhost:{port}/')
-    print(f'  Admin:   http://localhost:{port}/admin  (requires admin_password)')
+    print(f'  Admin:   http://localhost:{port}/admin  (no auth)')
     try:
         server.serve_forever()
     except KeyboardInterrupt:
