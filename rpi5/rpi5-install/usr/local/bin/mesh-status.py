@@ -1187,7 +1187,7 @@ def assemble_status_data():
             'limp':         ndata.get('IS_IN_LIMP_MODE', 'false').lower() == 'true',
             'all_macs':     [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()],
             'hop_count':    None,
-            'last_seen':    ndata.get('LAST_SEEN_TIMESTAMP', '0'),
+            'last_seen':    ndata.get('LAST_REGISTRY_UPDATE', ndata.get('LAST_SEEN_TIMESTAMP', '0')),
         })
 
     # If self not in registry, inject a placeholder
