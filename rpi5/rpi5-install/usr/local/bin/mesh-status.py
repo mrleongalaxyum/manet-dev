@@ -1187,6 +1187,7 @@ def assemble_status_data():
             'limp':         ndata.get('IS_IN_LIMP_MODE', 'false').lower() == 'true',
             'all_macs':     [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()],
             'hop_count':    None,
+            'last_seen':    ndata.get('LAST_SEEN_TIMESTAMP', '0'),
         })
 
     # If self not in registry, inject a placeholder
@@ -1201,7 +1202,7 @@ def assemble_status_data():
             'uptime': '', 'cpu': '', 'battery': None,
             'mumble': False, 'mediamtx': False, 'ntp': False,
             'state': 'ACTIVE', 'ch_2g': '', 'ch_5g': '', 'limp': False,
-            'hop_count': None,
+            'hop_count': None, 'last_seen': str(int(time.time())),
         })
 
     node_list.sort(key=lambda n: (not n['is_me'], -(n['tq'] if n['tq'] is not None else -1)))
