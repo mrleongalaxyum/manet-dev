@@ -1030,7 +1030,7 @@ network={
     ssid="$mesh_ssid"
     key_mgmt=SAE
     mode=5
-    channel=5
+    channel=1
     op_class=66
     country="$HALOW_REGULATORY_DOMAIN"
     s1g_prim_chwidth=0
@@ -1053,6 +1053,24 @@ network={
 }
 EOF
     fi
+
+    # Set HaLow TX power to 24 dBm (2400 mBm) after interface comes up
+cat << EOF > /etc/systemd/system/halow-txpower-$WLAN.service
+[Unit]
+Description=Set HaLow TX power for $WLAN
+After=wpa_supplicant-s1g-$WLAN.service
+Wants=wpa_supplicant-s1g-$WLAN.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 2400
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl enable halow-txpower-$WLAN.service
 
 cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service
 [Unit]
