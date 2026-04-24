@@ -848,6 +848,11 @@ def get_interfaces():
                 health = 'warn'
                 faults.append(f'Not in bat0 and not an AP — check wpa_supplicant')
 
+        # bat0/br0 report operstate=UNKNOWN (virtual iface); derive from UP flag instead
+        display_state = state
+        if state == 'UNKNOWN' and name in ('bat0', 'br0'):
+            display_state = 'UP' if 'UP' in flags else 'DOWN'
+
         ifaces.append({
             'name':     name,
             'role':     role,
@@ -855,7 +860,7 @@ def get_interfaces():
             'detail':   detail,
             'faults':   faults,
             'addrs':    addrs,
-            'state':    state,
+            'state':    display_state,
             'channel':  iw.get('channel', ''),
             'freq_mhz': iw.get('freq_mhz', ''),
             'txpower_dbm': iw.get('txpower_dbm', ''),
