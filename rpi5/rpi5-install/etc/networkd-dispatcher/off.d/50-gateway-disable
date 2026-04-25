@@ -114,4 +114,16 @@ nft flush chain ip nat postrouting 2>/dev/null || true
 /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
 systemctl restart gateway-route-manager.service 2>/dev/null || true
 
+# If a USB ethernet interface is already present, trigger autodetect for it
+# (its ADD udev event already fired and was skipped because end0 was upstream then)
+for _iface in $(ls /sys/class/net/ 2>/dev/null); do
+    case "$_iface" in bat*|br*|wlan*|lo|end0) continue ;; esac
+    _bus=$(readlink "/sys/class/net/$_iface/device/subsystem" 2>/dev/null | grep -o 'usb' || true)
+    if [ "$_bus" = "usb" ]; then
+        log "USB interface $_iface present after $IFACE went down — triggering autodetect"
+        /usr/local/bin/ethernet-autodetect.sh --iface "$_iface" --hotplug &
+        break
+    fi
+done
+
 log "Cleanup complete"
