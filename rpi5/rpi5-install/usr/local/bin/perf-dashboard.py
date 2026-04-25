@@ -1614,7 +1614,7 @@ let _pollTimer = null;
 let _overlayTimer = null;
 let _autoRefreshTimer = null;
 let _autoRefreshBusy = false;
-const VALID_TABS = ['topology','interfaces','radio','measure','sessions','upload'];
+const VALID_TABS = ['topology','radio','measure','sessions','upload'];
 const AUTO_REFRESH_MS = 15000;
 const THEME_KEY = 'manetUiTheme';
 
@@ -1670,7 +1670,7 @@ async function autoRefreshUi() {
   _autoRefreshBusy = true;
   try {
     await fetchTopo();
-    if (_tab === 'interfaces') buildIfaceControl();
+    if (_tab === 'radio') buildIfaceControl();
     if (_tab === 'sessions') await loadSessions();
   } finally {
     _autoRefreshBusy = false;
@@ -1856,7 +1856,7 @@ async function verifyRadioExecution(nodeIp, iface, state, activateAt) {
     const nodes = radioTargetNodes(nodeIp);
     const result = radioStateOk(nodes, iface, state);
     if (nodes.length && result.ok) {
-      buildIfaceControl();
+      if (_tab === 'radio') buildIfaceControl();
       const scope = nodeIp === 'all' ? 'all nodes' : (nodes[0].hostname || nodeIp);
       showOverlay(`${iface} ${state} executed on ${scope}`, 'ok');
       showMsg(`${iface} ${state} executed on ${scope}`, 'ok');
@@ -1950,6 +1950,7 @@ function showTab(name, updateUrl = true) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-pane').forEach(p => p.style.display = p.id === 'tab-' + name ? '' : 'none');
   if (name === 'sessions') loadSessions();
+  if (name === 'radio') buildIfaceControl();
 }
 
 // ── Clock ──
@@ -2517,9 +2518,8 @@ def render_dashboard():
 
 <div id="page">
 <div id="nav">
-  <div class="tab active" data-tab="topology"   onclick="showTab('topology')">TOPOLOGY</div>
-  <div class="tab"        data-tab="interfaces" onclick="showTab('interfaces')">INTERFACES</div>
-  <div class="tab"        data-tab="radio"      onclick="showTab('radio')">RADIO CONFIG</div>
+  <div class="tab active" data-tab="topology" onclick="showTab('topology')">TOPOLOGY</div>
+  <div class="tab"        data-tab="radio"    onclick="showTab('radio')">RADIO CONFIG</div>
   <div class="tab"        data-tab="measure"    onclick="showTab('measure')">MEASURE</div>
   <div class="tab"        data-tab="sessions"   onclick="showTab('sessions')">SESSIONS</div>
   <div class="tab"        data-tab="upload"     onclick="showTab('upload')">UPLOAD</div>
@@ -2538,8 +2538,8 @@ def render_dashboard():
     </div>
   </div>
 
-  <!-- ── INTERFACES ── -->
-  <div id="tab-interfaces" class="tab-pane" style="display:none">
+  <!-- ── RADIO CONFIG ── -->
+  <div id="tab-radio" class="tab-pane" style="display:none">
     <div class="card">
       <div class="card-title">Global Actions</div>
       <div class="global-bar" id="global-bar">
@@ -2552,10 +2552,6 @@ def render_dashboard():
       </div>
     </div>
     <div id="iface-cards"></div>
-  </div>
-
-  <!-- ── RADIO CONFIG ── -->
-  <div id="tab-radio" class="tab-pane" style="display:none">
     <div class="card">
       <div class="card-title">HaLow</div>
       <div class="row">
