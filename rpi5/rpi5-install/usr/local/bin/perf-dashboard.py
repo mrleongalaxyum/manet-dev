@@ -877,6 +877,7 @@ def build_topology():
             'ip':       ip,
             'is_me':    is_me,
             'is_gateway': nd.get('IS_GATEWAY', 'false').lower() == 'true',
+            'gateway_iface': nd.get('GATEWAY_IFACE', ''),
             'battery':  nd.get('BATTERY_PERCENTAGE', ''),
             'uptime':   fmt_uptime(nd.get('UPTIME_SECONDS', '')),
         }
@@ -1979,7 +1980,7 @@ function renderTopology() {
     const bat = node.battery ? `<div class="node-battery">BAT ${node.battery}%</div>` : '';
     const tags = [
       node.is_me ? '<span class="badge b-me" style="font-size:9px">ME</span>' : '',
-      node.is_gateway ? '<span class="badge b-gw" style="font-size:9px">GW</span>' : '',
+      node.is_gateway ? `<span class="badge b-gw" style="font-size:9px">GW${node.gateway_iface ? '·' + node.gateway_iface : ''}</span>` : '',
     ].filter(Boolean).join('');
     const cls = [node.is_me ? 'is-me' : '', node.is_gateway ? 'is-gw' : ''].join(' ');
     grid.innerHTML += `<div class="node-card ${cls}">

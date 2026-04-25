@@ -79,4 +79,7 @@ message NodeInfo {
   string wifi_24_rx_mcs = 63;
   string wifi_5_tx_mcs = 64;
   string wifi_5_rx_mcs = 65;
+
+  // --- Gateway Interface ---
+  string gateway_iface = 66; // Which interface is the upstream gateway (end0, usb0, enxXXX, etc.)
 }
