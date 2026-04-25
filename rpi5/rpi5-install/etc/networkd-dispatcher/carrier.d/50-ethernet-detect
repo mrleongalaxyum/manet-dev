@@ -6,19 +6,25 @@
 # swap or EUD access logic
 #
 
-TARGET_IFACE="end0"
-
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-DETECT: $1" | systemd-cat -t ethernet-carrier
 }
 
-# Exit when the interface that changed is not end0
-if [ "$IFACE" != "$TARGET_IFACE" ]; then
-    exit 0
+# Only handle end0 or USB ethernet interfaces; skip mesh/wifi/loopback
+case "$IFACE" in
+    bat*|br*|wlan*|lo) exit 0 ;;
+esac
+
+# Allow end0 always; for other interfaces check USB bus
+if [ "$IFACE" != "end0" ]; then
+    BUS=$(readlink /sys/class/net/$IFACE/device/subsystem 2>/dev/null | grep -o 'usb' || true)
+    if [ "$BUS" != "usb" ]; then
+        exit 0
+    fi
 fi
 
 log "Carrier state changed on $IFACE - running hotplug detection"
-/usr/local/bin/ethernet-autodetect.sh --hotplug
+/usr/local/bin/ethernet-autodetect.sh --iface "$IFACE" --hotplug
 
 # Automatic tool updates if enabled and internet is now available.
 if grep -qi '^auto_update=1' /etc/mesh.conf 2>/dev/null && ping -c 1 -W 2 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then

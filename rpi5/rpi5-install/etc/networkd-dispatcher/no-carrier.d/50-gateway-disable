@@ -1,14 +1,25 @@
 #!/bin/bash
-TARGET_IFACE="end0"
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
 NTP_STATE_FILE="/var/run/mesh-ntp.state"
 ETHERNET_STATE_FILE="/var/run/ethernet_detection_state"
+UPSTREAM_IFACE_FILE="/var/run/upstream_iface"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-OFF: $1" | systemd-cat -t ethernet-off
 }
 
-if [ "$IFACE" != "$TARGET_IFACE" ]; then
+# Only handle end0 or USB ethernet; skip mesh/wifi/loopback
+case "$IFACE" in
+    bat*|br*|wlan*|lo) exit 0 ;;
+esac
+if [ "$IFACE" != "end0" ]; then
+    BUS=$(readlink /sys/class/net/$IFACE/device/subsystem 2>/dev/null | grep -o 'usb' || true)
+    if [ "$BUS" != "usb" ]; then exit 0; fi
+fi
+
+# Must be the interface we're currently using upstream
+UPSTREAM=$(cat "$UPSTREAM_IFACE_FILE" 2>/dev/null || echo "end0")
+if [ "$IFACE" != "$UPSTREAM" ]; then
     exit 0
 fi
 
@@ -29,23 +40,20 @@ log "Cable unplugged from $IFACE - cleaning up all ethernet configurations..."
 # Stop all ethernet-related services
 systemctl stop dnsmasq.service 2>/dev/null
 
-# Flush all IPs from end0
 log "Flushing IP addresses from $IFACE"
 ip addr flush dev "$IFACE" 2>/dev/null
 ip link set "$IFACE" nomaster 2>/dev/null || true
 
-# Remove all networkd configs for end0
-log "Removing networkd configs"
-rm -f /etc/systemd/network/20-end0.network
-rm -f /etc/systemd/network/20-end0-*.network
-
-# Restore default DHCP config
-log "Restoring default DHCP config"
-cp /etc/systemd/network/10-end0.network.dhcp-default /etc/systemd/network/10-end0.network 2>/dev/null || true
+# Remove all networkd configs for upstream iface
+log "Removing networkd configs for $IFACE"
+rm -f /etc/systemd/network/20-${IFACE}.network
+rm -f /etc/systemd/network/20-${IFACE}-*.network
+# Clear saved upstream iface
+rm -f "$UPSTREAM_IFACE_FILE"
 
 # Restart networkd to apply changes
 networkctl reload 2>/dev/null || true
-networkctl reconfigure end0 2>/dev/null || true
+networkctl reconfigure "$IFACE" 2>/dev/null || true
 
 # Remove dnsmasq wired-eud config
 rm -f /etc/dnsmasq.d/mesh-wired-eud.conf 2>/dev/null

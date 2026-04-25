@@ -129,9 +129,29 @@ detect_hotplug_mode() {
     # If a previous wired-EUD state left end0 bridged, detach it before DHCP.
     ip link set "$ETH_IFACE" nomaster 2>/dev/null || true
 
-    if [ -f "$GATEWAY_CONFIG" ]; then
-        cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
-    fi
+    cat > "$ACTIVE_CONFIG" << EOF
+[Match]
+Name=${ETH_IFACE}
+
+[Link]
+RequiredForOnline=yes
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=yes
+Bridge=
+
+[DHCP]
+ClientIdentifier=mac
+UseDNS=yes
+UseNTP=yes
+UseRoutes=yes
+Timeout=10
+
+[DHCPv4]
+UseRoutes=yes
+UseGateway=yes
+EOF
 
     ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
     networkctl reload 2>/dev/null || true
@@ -294,12 +314,29 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
     ETH_IP="$EXISTING_IP"
 
-    if [ ! -f "$GATEWAY_CONFIG" ]; then
-        log "ERROR: Gateway template not found at $GATEWAY_CONFIG"
-        exit 1
-    fi
+    cat > "$ACTIVE_CONFIG" << EOF
+[Match]
+Name=${ETH_IFACE}
 
-    cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
+[Link]
+RequiredForOnline=yes
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=yes
+Bridge=
+
+[DHCP]
+ClientIdentifier=mac
+UseDNS=yes
+UseNTP=yes
+UseRoutes=yes
+Timeout=10
+
+[DHCPv4]
+UseRoutes=yes
+UseGateway=yes
+EOF
     touch /var/run/mesh-gateway.state
 
     # Configure NAT
