@@ -749,11 +749,17 @@ def coordinate_radio_toggle(node_ip, iface, state):
     if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
         return {'ok': False, 'error': 'Invalid iface or state'}
 
-    targets = radio_target_for_node(node_ip)
+    # Per-node toggle: call the target node directly, no Alfred broadcast
+    if node_ip != 'all':
+        r = call_node_api(node_ip, '/api/control/interface', 'POST',
+                          {'iface': iface, 'state': state})
+        return r
+
+    # Global toggle: use Alfred broadcast/consensus
     expected = radio_expected_hosts()
     if not expected:
         return {'ok': False, 'error': 'No reachable nodes in registry'}
-    if node_ip == 'all' and len(expected) < 2:
+    if len(expected) < 2:
         return {
             'ok': False,
             'error': 'Refusing global radio change: registry sees fewer than 2 reachable nodes. Wait for Alfred registry refresh and retry.',
@@ -765,7 +771,7 @@ def coordinate_radio_toggle(node_ip, iface, state):
         'issued_by': get_my_hostname(),
         'issued_at': int(time.time()),
         'activate_at': 0,
-        'targets': targets,
+        'targets': 'all',
         'desired': {iface: state},
     }
     pkg['version'] = make_radio_version(pkg)
@@ -808,7 +814,7 @@ def coordinate_radio_toggle(node_ip, iface, state):
         'activate_at': activate_at,
         'acked': sorted(ack_state['acks'].keys()),
         'expected': expected,
-        'targets': targets,
+        'targets': 'all',
     }
 
 def get_iw_info(iface):
@@ -1750,7 +1756,8 @@ function txPowerOptions(info) {
 function renderTxPowerSelect(id, info) {
   const opts = txPowerOptions(info);
   if (!opts.length) {
-    return `<select id="${id}" disabled><option value="">n/a</option></select>`;
+    const cur = normalizeDbm(info?.txpower_dbm) || '';
+    return `<input id="${id}" type="number" min="1" max="30" step="1" value="${cur}" style="width:60px" placeholder="dBm">`;
   }
   const current = normalizeDbm(info?.txpower_dbm) || opts[opts.length - 1];
   return `<select id="${id}">` +
@@ -2036,8 +2043,13 @@ function buildIfaceControl() {
 
 async function toggleIface(nodeIp, nodeId, iface, state) {
   if (state === 'down' && !confirmRadioDown(nodeIp, iface)) return;
-  showOverlay(`Coordinating ${iface} ${state} on ${nodeIp} through Alfred...`, 'info');
-  showMsg(`Staging ${iface} ${state}; waiting for mesh ACKs...`, 'info');
+  const isAll = nodeIp === 'all';
+  showOverlay(isAll
+    ? `Coordinating ${iface} ${state} on all nodes through Alfred...`
+    : `Setting ${iface} ${state} on ${nodeIp}...`, 'info');
+  showMsg(isAll
+    ? `Staging ${iface} ${state}; waiting for mesh ACKs...`
+    : `Setting ${iface} ${state} on ${nodeIp}...`, 'info');
   try {
     const r = await fetch('/api/interface/toggle', {
       method: 'POST',
@@ -2046,10 +2058,16 @@ async function toggleIface(nodeIp, nodeId, iface, state) {
     });
     const d = await r.json();
     if (d.ok) {
-      const wait = d.activate_at ? Math.max(0, d.activate_at - Math.floor(Date.now() / 1000)) : 0;
-      showOverlay(`${iface} ${state} ACKed by ${d.acked?.length || 0}/${d.expected?.length || 0} nodes. Applying in ${wait}s...`, 'ok');
-      showMsg(`${iface} ${state} scheduled through Alfred`, 'ok');
-      verifyRadioExecution(nodeIp, iface, state, d.activate_at);
+      if (d.activate_at) {
+        const wait = Math.max(0, d.activate_at - Math.floor(Date.now() / 1000));
+        showOverlay(`${iface} ${state} ACKed by ${d.acked?.length || 0}/${d.expected?.length || 0} nodes. Applying in ${wait}s...`, 'ok');
+        showMsg(`${iface} ${state} scheduled through Alfred`, 'ok');
+        verifyRadioExecution(nodeIp, iface, state, d.activate_at);
+      } else {
+        showOverlay(`${iface} ${state} applied on ${nodeIp}`, 'ok');
+        showMsg(`${iface} ${state} applied`, 'ok');
+        setTimeout(() => { hideOverlay(); loadTopology(); }, 3000);
+      }
     } else {
       showOverlay(`Radio change failed: ${d.error}`, 'err');
       showMsg('Error: ' + d.error, 'err');
@@ -2917,78 +2935,39 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 nodes_raw = parse_registry()
-                # Step 1: probe reachable nodes via mesh IP and snapshot current channel
-                # Nodes not reachable through mesh will timeout — no ethernet fallback
-                reachable = []   # {hostname, ip, old_ch, old_bw}
-                unreachable = [] # hostnames
+                # Step 1: collect all known nodes from registry (no pre-ping — mesh may be only HaLow)
+                targets = []
                 for nd in nodes_raw.values():
                     ip       = nd.get('IPV4_ADDRESS', '')
                     hostname = nd.get('HOSTNAME', ip)
-                    if not ip:
-                        continue
-                    local = call_node_api(ip, '/api/local', timeout=4)
-                    if 'error' in local and local.get('ok') is False:
-                        unreachable.append(hostname)
-                        continue
-                    ifaces = {i['name']: i for i in local.get('interfaces', []) if 'name' in i}
-                    w2 = ifaces.get('wlan2', {})
-                    reachable.append({
-                        'hostname': hostname,
-                        'ip':       ip,
-                        'old_ch':   w2.get('channel', ''),
-                        'old_bw':   w2.get('halow_bw', ''),
-                    })
+                    if ip:
+                        targets.append({'hostname': hostname, 'ip': ip})
 
-                if not reachable:
-                    self.send_json({'ok': False, 'error': 'No reachable nodes'})
+                if not targets:
+                    self.send_json({'ok': False, 'error': 'No nodes in registry'})
                     return
 
-                # Step 2: apply new channel to all reachable nodes
+                # Step 2: apply new channel to all nodes simultaneously.
+                # NOTE: when HaLow is the only active mesh interface, all nodes will
+                # temporarily lose connectivity during this step — this is expected.
+                # We do NOT verify via mesh IP afterwards (mesh is down during switch).
+                # We do NOT roll back (rollback calls would also fail via unreachable mesh).
                 failed = []
                 applied = []
-                for node in reachable:
+                for node in targets:
                     r = call_node_api(node['ip'], '/api/control/halow_channel', 'POST', req)
                     if r.get('ok'):
-                        applied.append(node)
+                        applied.append(node['hostname'])
                     else:
-                        failed.append({'hostname': node['hostname'], 'error': r.get('error', 'failed')})
+                        failed.append(f"{node['hostname']}: {r.get('error', 'failed')}")
 
-                # Step 3: verify via morse_cli (re-read; retry up to 3x with 2s spacing)
-                verify_failed = []
-                for node in applied:
-                    confirmed = False
-                    for _ in range(3):
-                        time.sleep(2)
-                        local = call_node_api(node['ip'], '/api/local', timeout=5)
-                        ifaces = {i['name']: i for i in local.get('interfaces', []) if 'name' in i}
-                        actual_ch = ifaces.get('wlan2', {}).get('channel', '')
-                        if str(actual_ch) == str(new_ch):
-                            confirmed = True
-                            break
-                    if not confirmed:
-                        verify_failed.append(node['hostname'])
-
-                # Step 4: rollback if any verification failed
-                if verify_failed or failed:
-                    for node in applied:
-                        if node['old_ch']:
-                            call_node_api(node['ip'], '/api/control/halow_channel', 'POST', {
-                                'channel': node['old_ch'], 'bw': node['old_bw'] or '1MHz'
-                            })
-                    err_parts = []
-                    if failed:
-                        err_parts.append('apply failed: ' + ', '.join(f['hostname'] for f in failed))
-                    if verify_failed:
-                        err_parts.append('verify failed: ' + ', '.join(verify_failed))
-                    self.send_json({'ok': False, 'error': '; '.join(err_parts),
-                                    'rolled_back': True,
-                                    'unreachable': unreachable})
+                if failed and not applied:
+                    self.send_json({'ok': False, 'error': '; '.join(failed)})
                     return
 
-                result = {'ok': True, 'applied': [n['hostname'] for n in applied]}
-                if unreachable:
-                    result['warning'] = 'Unreachable (not in mesh): ' + ', '.join(unreachable)
-                    result['unreachable'] = unreachable
+                result = {'ok': True, 'applied': applied}
+                if failed:
+                    result['warning'] = 'Some nodes failed: ' + '; '.join(failed)
                 self.send_json(result)
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
