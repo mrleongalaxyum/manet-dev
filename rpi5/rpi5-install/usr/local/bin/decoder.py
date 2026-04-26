@@ -32,6 +32,7 @@ def main():
         print(f"SYNCTHING_ID='{node_info.syncthing_id}'")
         print(f"TQ_AVERAGE={node_info.tq_average}")
         print(f"IS_INTERNET_GATEWAY={str(node_info.is_internet_gateway).lower()}")
+        print(f"GATEWAY_IFACE='{node_info.gateway_iface}'")
         print(f"IS_MUMBLE_SERVER={str(node_info.is_mumble_server).lower()}")
         print(f"IS_NTP_SERVER={str(node_info.is_ntp_server).lower()}")
         print(f"IS_TAK_SERVER={str(node_info.is_tak_server).lower()}")

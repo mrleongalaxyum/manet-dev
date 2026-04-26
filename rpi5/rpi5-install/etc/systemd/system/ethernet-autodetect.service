@@ -2,11 +2,11 @@
 Description=MANET Ethernet Hotplug Auto Detection
 After=systemd-networkd.service batman-enslave.service
 Wants=systemd-networkd.service
-ConditionPathExists=/usr/local/bin/ethernet-autodetect.sh
+ConditionPathExists=/usr/local/bin/manet-uplink-dispatch.sh
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug
+ExecStart=/usr/local/bin/manet-uplink-dispatch.sh reconcile
 TimeoutStartSec=45
 
 [Install]
