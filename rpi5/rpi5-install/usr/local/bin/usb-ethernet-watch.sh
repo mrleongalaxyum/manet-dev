@@ -80,7 +80,7 @@ EOF
         fi
 
         log "USB ethernet $IFACE taking over as gateway..."
-        /usr/local/bin/ethernet-autodetect.sh --iface "$IFACE" --hotplug
+        /usr/local/bin/manet-uplink-dispatch.sh add "$IFACE"
         ;;
     remove|offline)
         log "USB ethernet removed: $IFACE — running cleanup"
@@ -88,14 +88,7 @@ EOF
         if [ -f /var/run/upstream_iface ] && [ "$(cat /var/run/upstream_iface)" = "$IFACE" ]; then
             rm -f /var/run/upstream_iface
         fi
-        IFACE="$IFACE" /etc/networkd-dispatcher/off.d/50-gateway-disable 2>/dev/null || {
-            rm -f /var/run/mesh-gateway.state /var/run/mesh-ntp.state /var/run/ethernet_detection_state
-            ip addr flush dev "$IFACE" 2>/dev/null || true
-            batctl gw_mode client 2>/dev/null || true
-            nft flush chain ip nat postrouting 2>/dev/null || true
-            systemctl restart gateway-route-manager.service 2>/dev/null || true
-            systemctl restart dnsmasq.service 2>/dev/null || true
-        }
+        /usr/local/bin/manet-uplink-dispatch.sh remove "$IFACE"
         ;;
     *)
         log "Unknown action: $ACTION"
