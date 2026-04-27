@@ -187,6 +187,12 @@ cd rpi5/rpi5-install && tar -czf ../rpi5-install.tar.gz .
 ```
 Building from the parent directory creates a prefix folder and scripts end up at `/rpi5-install/` instead of `/`.
 
+**IMPORTANT — Windows git symlinks:** The repo must be cloned with `core.symlinks=true` (set in `.git/config`). Without it, git on Windows stores symlinks as plain text files. Symlinks in `etc/systemd/system/multi-user.target.wants/` and `timers.target.wants/` must be real symlinks (mode `120000`) — if they end up as text files in the tarball, systemd silently ignores them and the services are never enabled after provisioning. Verify with:
+```bash
+git ls-files -s rpi5/rpi5-install/etc/systemd/system/multi-user.target.wants/
+```
+All entries must show mode `120000`, not `100644`.
+
 ### Provisioning a new node
 
 1. Flash SD with base Raspberry Pi OS image

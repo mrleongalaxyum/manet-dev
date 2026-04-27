@@ -1,5 +1,39 @@
 # MANET Change History
 
+## 2026-04-27
+
+### Fix: perf.local login forma submitala na prvom unesenom slovu
+
+`render_perf_auth_page()` u `mesh-status.py` imao je `input`, `change`, `blur` i tri `setTimeout` listenera koji su pozivali `trySubmit()`. Uvjet `document.activeElement === password` je bio `true` dok korisnik tipka, pa se forma submitala čim se upišu prvo slovo.
+
+Ispravak: uklonjeni svi listeneri osim `animationstart`. `animationstart` se okida isključivo kada browser autofilluje polje (CSS `@keyframes autofill-detect` trik) — ne pri ručnom unosu. Manuelni submit ostaje na Enter ili kliku na Login dugme.
+
+Deployano na sva 4 noda.
+
+---
+
+### Fix: mesh-mdns-publisher.service nikad nije bio aktivan — Windows git symlink bug
+
+`mumble.local` i `mtx.local` nisu radili jer `mesh-mdns-publisher.service` nije bio enable-an ni na jednom nodu.
+
+**Uzrok:** `core.symlinks=false` u git konfiguraciji na Windows razvojnoj mašini. Git je symlink fajlove u `multi-user.target.wants/` i `timers.target.wants/` pohranio kao regularne tekstualne fajlove (`100644` mode) umjesto pravih symlinkovaka (`120000` mode). Tarball izgrađen s tog checkoutsa nosio je tekstualne fajlove na nodove. systemd ignorira sve što nije pravi symlink u `*.target.wants/` direktorijumima — servis je ostajao `disabled` bez ikakve greške.
+
+Pogođeni fajlovi u repou:
+- `etc/systemd/system/multi-user.target.wants/mesh-mdns-publisher.service` (100644 → 120000)
+- `etc/systemd/system/timers.target.wants/mesh-mdns-update.timer` (100644 → 120000)
+
+**Popravak u repou:** `git update-index --cacheinfo 120000,...` za oba fajla + `git config core.symlinks true`. Na živim nodovima symlink je kreiran ručno (`ln -sf`) i servis startovan.
+
+**Provjera:** Nakon starta publishera na sva 4 noda, journald potvrđuje:
+```
+[MESH-MDNS-PUB] registered mumble
+[MESH-MDNS-PUB] registered mtx
+```
+
+**Napomena za buduće tarball gradnje:** Ako se repo klonira na Windowsu, provjeriti `git config core.symlinks` — mora biti `true`, inače symlinkovi u install treeju postaju tekstualni fajlovi i servisi se ne enable-aju pri provisioning-u.
+
+---
+
 ## 2026-04-22
 
 ### FER brand alignment for `manet.local` and `perf.local`
