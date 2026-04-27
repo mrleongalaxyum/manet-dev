@@ -334,6 +334,22 @@ For change history and bug log see [history.md](history.md).
 - Dodan je `mesh-mdns-publisher.py` + `mesh-mdns-publisher.service` koji preko `python3-zeroconf` eksplicitno objavljuje `mumble.local` i `mtx.local` samo na `br0`.
 - `mesh-mdns-update.sh` ostaje zadužen samo za `manet.local` i `perf.local`.
 
+### 2026-04-27 - Election incumbent detection fix
+
+- **Bug:** `mumble-election.sh` i `mediamtx-election.sh` su određivali incumbency provjeri lokalnog VIP-a na `br0`. Svaki node s VIP-om (`ip addr show dev br0 | grep -q "inet $VIP/"`) bi proglasio sebe vođom → primio +10 TQ bias → pobijedio vlastite izbore. Kad VIP ostane na više nodova (npr. zbog election failure), sva 4 noda su paralelno pokretala Mumble/MediaMTX servis.
+- **Popravak:** Oba election skripte sada čitaju `IS_MUMBLE_SERVER='true'` / `IS_MEDIAMTX_SERVER='true'` iz Alfred-propagiranog node registra (`/var/run/mesh_node_registry`) kao autoritativan izvor incumbency. `node-manager.sh` te flagove postavlja samo kad lokalni node drži i aktivni servis i VIP → svi nodovi čitaju konzistentne Alfred-sync podatke.
+- Deployano na sva 4 noda. Pobjednički node: mesh-78f7 (`10.30.2.204`) drži oba VIP-a (`10.30.2.2`, `10.30.2.3`).
+
+### 2026-04-27 - Login forma auto-submit fix
+
+- `render_perf_auth_page()` u `mesh-status.py` je submitao formu na prvom unesenom slovu jer je `input` listener pozivao `trySubmit()` dok je password field bio fokusiran.
+- Ispravak: uklonjeni `input`, `change`, `blur` listeneri i `setTimeout` fallbacki — ostao je samo `animationstart` koji se okida isključivo pri browser autofill-u, ne pri ručnom unosu.
+
+### 2026-04-27 - mesh-mdns-publisher.service Windows symlink fix
+
+- `core.symlinks=false` na Windows git konfiguraciji pohranio je symlinke u `multi-user.target.wants/` i `timers.target.wants/` kao regularne tekstualne fajlove (mode `100644`). systemd ignorira non-symlink fajlove u `*.target.wants/` → servis nikad nije bio enable-an.
+- Fix: `git update-index --cacheinfo 120000,...` za pogođene fajlove + `git config core.symlinks true` u repo konfiguraciji. Tarball se mora graditi s `core.symlinks=true`.
+
 ### 2026-04-22 - MANET palette cleanup
 
 - `mesh-status.py` dashboard pass uklanja plave tematske akcente s glavnog `manet.local` UI-ja.

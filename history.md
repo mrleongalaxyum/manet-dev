@@ -34,6 +34,38 @@ Pogođeni fajlovi u repou:
 
 ---
 
+### Fix: election skripta — svaki node pobjeđivao vlastite izbore (VIP incumbency bug)
+
+Sva 4 noda su istovremeno držali VIP adrese `10.30.2.2` (MediaMTX) i `10.30.2.3` (Mumble) na `br0`. Oba servisa su radila na svim nodovima paralelno.
+
+**Uzrok:** `mumble-election.sh` i `mediamtx-election.sh` su određivali incumbency (koji node je trenutni vođa) tako što su provjeravali je li lokalni node ima VIP na `br0`:
+```bash
+# Stari, pokvareni kod:
+if ip addr show dev br0 | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
+    CURRENT_LEADER_MAC="$MY_MAC"  # Svaki node s VIP-om proglašava sebe vođom
+fi
+```
+Kada je VIP slučajno ostao na više nodova (npr. zbog sqlite3 greške koja je sprečavala election u ranijem period), svaki node bi vidio vlastiti VIP, dodijelio sebi +10 TQ incumbency bias i pobijedio vlastite izbore. Ni ARP-based pristup nije pomogao jer node ne vidi vlastitu MAC adresu u `ip neigh show` tablici za vlastiti VIP.
+
+**Popravak:** Incumbency se sada čita iz Alfred-propagiranog node registra (`/var/run/mesh_node_registry`). `node-manager.sh` već ispravno postavlja `IS_MUMBLE_SERVER='true'` / `IS_MEDIAMTX_SERVER='true'` samo kad node drži I aktivni servis I VIP — svi nodovi čitaju iste Alfred-sync podatke, pa je ground truth konzistentan mreži.
+```bash
+# Novi, ispravni kod:
+CURRENT_LEADER_MAC=""
+if [ -f "$REGISTRY_STATE_FILE" ]; then
+    INCUMBENT_NODE_ID=$(grep "IS_MEDIAMTX_SERVER='true'" "$REGISTRY_STATE_FILE" \
+        | head -1 | sed "s/NODE_\([^_]*\)_.*/\1/")
+    if [ -n "$INCUMBENT_NODE_ID" ]; then
+        INCUMBENT_MAC=$(grep "^NODE_${INCUMBENT_NODE_ID}_MAC_ADDRESS=" "$REGISTRY_STATE_FILE" \
+            | cut -d"'" -f2)
+        [ -n "$INCUMBENT_MAC" ] && CURRENT_LEADER_MAC="$INCUMBENT_MAC"
+    fi
+fi
+```
+
+Deployano na sva 4 noda. Stale VIP-ovi manualno uklonjeni sa losing nodova. Pobjednički node: mesh-78f7 (`10.30.2.204`) drži `10.30.2.2` i `10.30.2.3`.
+
+---
+
 ## 2026-04-22
 
 ### FER brand alignment for `manet.local` and `perf.local`
