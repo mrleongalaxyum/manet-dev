@@ -2,3 +2,4 @@ morse-hostap
 .claude/
 .ssh/
 tests/
+*.tar.gz

@@ -52,42 +52,13 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 
 ---
 
-## Colorado SFTP Server
-
-- **Host:** www.colorado-governor.com
-- **Port:** 11238
-- **User:** clanker
-- **Protocol:** SFTP
-- **Private key** (save to file, chmod 600):
-
-```
------BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACCnNETHB0/u45sU67/gxRlgRk10+sJOZp+3W2YDYlBmUgAAAKCoL4EoqC+B
-KAAAAAtzc2gtZWQyNTUxOQAAACCnNETHB0/u45sU67/gxRlgRk10+sJOZp+3W2YDYlBmUg
-AAAEAUxp+UL8DvbQaBtsGRgs9309eWPPpdYzubfZYqzZ0ZWqc0RMcHT+7jmxTrv+DFGWBG
-TXT6wk5mn7dbZgNiUGZSAAAAFmNsYW5rZXJAY29sb3JhZG8tbWFuZXQBAgMEBQYH
------END OPENSSH PRIVATE KEY-----
-```
-
-- **Public key:** `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKc0RMcHT+7jmxTrv+DFGWBGTXT6wk5mn7dbZgNiUGZS clanker@colorado-manet`
-
-**Connect:**
-```bash
-sftp -i .ssh/colorado-manet-key -P 11238 clanker@www.colorado-governor.com
-```
-
----
-
 ## Tarball distribution
+
+`*.tar.gz` fajlovi **nisu u git repozitorijumu** — ignoriraju se putem `.gitignore`. Tarball se drži lokalno i objavljuje isključivo kao GitHub Release artifact.
 
 Tarball releases are published as GitHub Release artifacts:
 - **Latest:** https://github.com/mrleongalaxyum/manet-dev/releases/latest
 - **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.9-runtime-dashboard-fixes
-
-Also mirrored on Colorado SFTP: `/rpi5/rpi5-install.tar.gz`
-
-**Local server (backup):** 192.168.1.131, user: leon, password: hobbyking. Files served from `~/Desktop/MANET/manet/` via Docker nginx. Upload: `curl -u clanker:really-strong-password-321 -T <file> https://manet.ventum.hr/upload/rpi5/<file>`
 
 ---
 
@@ -127,7 +98,7 @@ ssh -J radio@192.168.1.53 radio@10.30.2.28    # reach mesh-78f3 via mesh-78f7
 - **Active branch:** `master`
 - `rpi5/rpi5-install/` — install package (all 4 nodes provisioned from this)
 - `rpi5/rpi5-live/78f3/` and `rpi5/rpi5-live/78f7/` — live script snapshots from nodes (taken 2026-04-17, before full reprovision — for reference only)
-- `rpi5/rpi5-install.tar.gz` — built tarball, uploaded to Ventum (`/manet/rpi5/rpi5-install.tar.gz`) and available on Colorado SFTP (`/rpi5/rpi5-install.tar.gz`)
+- `rpi5/rpi5-install.tar.gz` — **nije u repozitorijumu** (gitignored); drži se lokalno i objavljuje se kao GitHub Release artifact
 
 ### Key scripts (all under `rpi5/rpi5-install/usr/local/bin/`)
 

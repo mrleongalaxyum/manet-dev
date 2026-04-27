@@ -39,7 +39,8 @@ Dashboard `perf.local` služi kao **control plane** za pokretanje mjernih sesija
 - Header local time tece u realnom vremenu (setInterval, ne zamrznuti server timestamp).
 - CPU load prikazuje se na 2 decimale.
 - `perf.local` header accent strip usklađen s `manet.local` dark yellow gradientom.
-- Sve izmjene mergane na `master`, release `v0.9-runtime-dashboard-fixes` na GitHubu, tarball na Ventumu i Colorado SFTP.
+- Sve izmjene mergane na `master`, release `v0.9-runtime-dashboard-fixes` na GitHubu.
+- `*.tar.gz` uklonjen iz git trackinga (gitignored) — drži se lokalno i objavljuje se isključivo kao GitHub Release artifact.
 
 ---
 
@@ -85,7 +86,7 @@ br0 (bridge)    ← bat0 + end0 + wlan3 (ako EUD wireless mode)
 - Laptop pristupa kroz wlan3 AP bilo kojeg noda — nema ovisnosti o ethernet/gateway statusu
 - mDNS: `perf.local` → port 8081 (ne miješati s postojećim mesh-status.py na portu 80)
 - Tech stack: **Python 3 + http.server + inline HTML/JS** (bez npm/node, isti pattern kao mesh-status.py)
-- Upload na GitHub/Ventum dostupan samo kada gateway ima internet
+- Upload na GitHub dostupan samo kada gateway ima internet
 
 ### Avahi mDNS config
 - Nova datoteka: `/etc/avahi/services/perf-http.service` (port 8081, ime "MANET Perf Dashboard")
@@ -207,7 +208,6 @@ sudo batctl if add wlan2
 
 ### 4. Upload rezultata
 - Gumb "Upload to GitHub" — git commit + push novog JSON/CSV
-- Gumb "Upload to Ventum" — spakira `/var/log/manet-measurements` u `tar.gz` i šalje na Ventum HTTP upload preko `curl -u`
 - **Ne uploadati automatski** — samo na eksplicitni zahtjev
 
 ### 5. Pregled prošlih mjerenja
@@ -302,7 +302,6 @@ GET  /api/sessions              # Lista prošlih sesija
 GET  /api/sessions/<id>         # Dohvati rezultate sesije
 DELETE /api/sessions/<id>       # Obriši saved session uz UI confirmation
 POST /api/upload/github         # Git push rezultata
-POST /api/upload/ventum         # curl -u upload tar.gz bundlea na Ventum
 ```
 
 ### Control API na svakom nodu (dodati u mesh-status.py)
@@ -327,7 +326,7 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
 
 - `perf.local` dostupan kroz mesh (bat0 → br0 → laptop na wlan3 AP ili end0)
 - Sva mjerenja se spremaju lokalno na gateway nodu (`/var/log/manet-measurements/`)
-- Upload na GitHub/Ventum je **odgođen** — gumb postane aktivan tek kada internet dostupan (`/run/mesh-gateway.state` postoji)
+- Upload na GitHub je **odgođen** — gumb postane aktivan tek kada internet dostupan (`/run/mesh-gateway.state` postoji)
 - Dashboard detektira internet: `curl -s --max-time 2 -o /dev/null https://github.com && echo ok`
 - Ako nema interneta: gumbi "Upload" su disabled s tooltipom "No internet"
 - iperf3 testovi rade isključivo unutar mesha (mesh IP adrese) — ne trebaju internet
@@ -351,11 +350,9 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
 
 ---
 
-## Ventum / GitHub pristup
+## GitHub pristup
 
 - GitHub: `mrleongalaxyum/manet-dev` (public) — measurements u `measurements/` folderu
-- Ventum measurements upload: `curl -u <user>:<password> -T <file> https://manet.ventum.hr/upload/rpi5/measurements/<file>`
-- Runtime config overridei u `/etc/mesh.conf`: `ventum_upload_url`, `ventum_auth` ili `ventum_user` + `ventum_password`
 
 ---
 
