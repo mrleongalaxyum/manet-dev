@@ -3401,20 +3401,11 @@ button {{
       const password = document.getElementById('password');
       if (!form || !password) return;
       let submitted = false;
-      const trySubmit = () => {{
-        if (submitted) return;
-        if (!password.value) return;
-        if (!(password.matches(':-webkit-autofill, :autofill') || document.activeElement === password)) return;
+      password.addEventListener('animationstart', () => {{
+        if (submitted || !password.value) return;
         submitted = true;
         requestAnimationFrame(() => form.requestSubmit());
-      }};
-      password.addEventListener('animationstart', trySubmit);
-      password.addEventListener('input', trySubmit);
-      password.addEventListener('change', trySubmit);
-      password.addEventListener('blur', trySubmit);
-      setTimeout(trySubmit, 200);
-      setTimeout(trySubmit, 800);
-      setTimeout(trySubmit, 1400);
+      }});
     }})();
   </script>
 </body>
