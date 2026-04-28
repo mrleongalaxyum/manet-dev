@@ -678,14 +678,9 @@ Module backups:
 
 ## Remaining Work Plan
 
-1. Decide whether to bake these experimental artifacts into `rpi5/rpi5-install` image or keep them as lab-only generated artifacts.
-2. If baking into the image, replace:
-   - `/usr/lib/firmware/morse/bcf_boardtype_0807.bin`
-   - matching BCF aliases for MF15457 if desired
-   - `/lib/modules/6.6.78-manet+/extra/morse/dot11ah.ko`
-   - `/lib/modules/6.6.78-manet+/extra/morse/morse.ko`
-3. Verify conducted output with measurement gear. `iw` confirms software state, not calibrated RF output.
-4. Consider rebuilding `morse.ko` properly from source once the exact kernel build tree is available, instead of keeping the binary force patch.
+1. ~~Decide whether to bake these experimental artifacts into `rpi5/rpi5-install` image~~ — **DONE (2026-04-28).** All three patched files replaced in image. Five BCF aliases updated to `all24` content. Released as v0.22-halow-24dbm. Build artifacts kept in `build/morse-bcf/`.
+2. Verify conducted output with measurement gear. `iw` confirms software state, not calibrated RF output.
+3. Consider rebuilding `morse.ko` properly from source once the exact kernel build tree is available, instead of keeping the binary force patch.
 
 ## Final Working Model
 

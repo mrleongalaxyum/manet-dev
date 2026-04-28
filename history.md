@@ -59,6 +59,28 @@ sudo journalctl -b -1 --no-pager | tail -80
 
 ---
 
+### Deploy: HaLow 24 dBm unlock na svim nodovima — baken u image, v0.22 release
+
+**Uzrok:** Stock BCF (`bcf_boardtype_0807.bin`) ograničava EU TX power na 15 dBm na firmware razini. `iw dev wlan2 set txpower fixed 2400` se tiho clippa. GUI "Apply 24 dBm" nije imao efekta.
+
+**Tri-dijelni unlock (sve tri komponente su obavezne):**
+1. `bcf_boardtype_0807-all24.bin` — sve regdomain TX power TLV-ove podiže na 96 qdBm (24 dBm) s regeneriranim CRC-ovima. BCF CRC formula: board CRC = `zlib.crc32(board_config[8:8+board_len+8])`; regdomain CRC = `zlib.crc32(regdom[4:4+reg_len+8], seed)` gdje je `seed = zlib.crc32(b"# Morse Micro regulatory domain #", board_crc)`.
+2. `dot11ah-eu26.ko` — patchuje EU `max_eirp` u Linux regulatory tablici s 16 dBm na 26 dBm (`.data` offset `0x8380`, 6 EU pravila, `0x10` stride). Bez ovog patcha kernel clippa na 16 dBm bez obzira na BCF.
+3. `morse-force2600.ko` — patchuje `morse_mac_set_txpower()` na file offsetu `0x5b70`: `mov w20,#0xa45; nop; nop` (2600 mBm). Zaobilazi preostali host/firmware clamp.
+
+EU25 i EU26 paket oba rezultiraju 24.00 dBm (hardverski ceiling). EU26 ostavljen kao "viši traženi" za reporting.
+
+**Instalirano na svim nodovima i verifikovano:**
+```
+mesh-7946, mesh-78f3, mesh-78f7, mesh-f86f  →  txpower 24.00 dBm
+```
+
+**Baken u image:** svi patched fajlovi zamijenjeni u `rpi5/rpi5-install/`, build artifakti u `build/morse-bcf/`. Commit `4373775`. Releaseano kao [v0.22-halow-24dbm](https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.22-halow-24dbm).
+
+**Tarball fix:** Windows NTFS gubi `lib -> usr/lib` symlink. Ispravna procedura: `git archive HEAD:rpi5/rpi5-install | tar -x -C /tmp/extract` (symlink iz gita), zatim `sudo tar --owner=root --group=root -czf rpi5-install.tar.gz -C /tmp/extract .`.
+
+---
+
 ## 2026-04-27
 
 ### Fix: perf.local login forma submitala na prvom unesenom slovu

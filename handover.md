@@ -21,7 +21,8 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 - **Service VIP formula:** `HostMin+1` = MediaMTX VIP (`mtx.local`), `HostMin+2` = Mumble VIP (`mumble.local`). VIPs are deterministic from `ipv4_network` in `/etc/mesh.conf` — same formula in election scripts and dnsmasq config.
 - **Election incumbency bug fixed.** Both `mediamtx-election.sh` and `mumble-election.sh` now read incumbent from Alfred registry (`IS_MEDIAMTX_SERVER='true'` / `IS_MUMBLE_SERVER='true'`) instead of checking local VIP presence. Deployed to all 4 nodes. Confirmed winner: mesh-78f7.
 - **mesh-f86f periodic reboot — investigation ongoing.** No crash dump, no OOM, no pstore. Likely cause: kernel hang → 1-min hardware watchdog reset. Possible culprit: `morse_usb` USB HaLow adapter requesting 500 mA causing USB timeout. Persistent journal activated (`/var/log/journal/`). After next reboot, run `sudo journalctl -b -1 --no-pager | tail -80`.
-- **Tarball must be built on Linux** with `sudo tar --owner=root --group=root`. See tarball packaging section above.
+- **HaLow 24 dBm unlock deployed on all 4 nodes and baked into image.** Three-piece package: `bcf_boardtype_0807-all24.bin` (all regdomain TLVs to 24 dBm), `dot11ah-eu26.ko` (EU kernel regulatory max_eirp raised to 26 dBm), `morse-force2600.ko` (bypasses remaining set-power clamp). Build artifacts in `build/morse-bcf/`. Released as v0.22-halow-24dbm.
+- **Tarball must be built via `git archive` + WSL** — `git archive HEAD:rpi5/rpi5-install | tar -x` preserves the `lib -> usr/lib` symlink that Windows NTFS drops; then `sudo tar --owner=root --group=root` for root ownership. See tarball packaging section above.
 
 ---
 
@@ -68,7 +69,7 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 
 Tarball releases are published as GitHub Release artifacts:
 - **Latest:** https://github.com/mrleongalaxyum/manet-dev/releases/latest
-- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.9-runtime-dashboard-fixes
+- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.22-halow-24dbm
 
 ---
 
