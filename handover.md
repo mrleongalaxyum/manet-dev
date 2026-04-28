@@ -181,11 +181,44 @@ All nodes have Waveshare UPS HAT (E) with IP2368 MCU at I2C `0x2D`. INA219 at `0
 
 **Battery data in mesh:** `node-manager-*.sh` reads `/run/battery_status.json` and passes `--battery-percentage` to `encoder.py` → alfred gossip type 68 → visible in `mesh-status.py` peer cards.
 
-**IMPORTANT — tarball packaging:** The tarball must be built from inside the `rpi5-install/` directory so it extracts directly to `/` on the node:
+**IMPORTANT — tarball packaging:** The tarball must be built on a **Linux machine** (e.g. one of the RPi5 nodes) from inside the `rpi5-install/` directory with explicit root ownership:
 ```bash
-cd rpi5/rpi5-install && tar -czf ../rpi5-install.tar.gz .
+cd rpi5/rpi5-install
+sudo tar --owner=root --group=root -czf ../rpi5-install.tar.gz .
 ```
-Building from the parent directory creates a prefix folder and scripts end up at `/rpi5-install/` instead of `/`.
+Two requirements must both be met:
+- **`sudo`** — ensures all entries in the tarball are owned by `root:root`. Without it, files are owned by the build user (e.g. `radio:radio`) and after provisioning `/usr/local/bin/` scripts end up non-root owned.
+- **Built on Linux** — Windows (Git Bash/pscp) cannot create real symlinks on NTFS. Building on Windows produces a tarball where `etc/systemd/system/multi-user.target.wants/*.service` and `lib → usr/lib` are broken (regular files instead of symlinks), causing systemd to silently skip service enablement on provisioning.
+
+Typical workflow when building from a Windows dev machine:
+```bash
+# 1. Pack git archive locally (no extraction — avoids Windows symlink problem)
+git archive HEAD -- rpi5/rpi5-install/ | gzip > /tmp/rpi5-build-src.tar.gz
+
+# 2. Transfer to a node and rebuild there
+scp /tmp/rpi5-build-src.tar.gz radio@<node-ip>:/tmp/
+ssh radio@<node-ip> '
+  mkdir -p /tmp/rpi5-build && cd /tmp/rpi5-build
+  tar --strip-components=2 -xzf /tmp/rpi5-build-src.tar.gz
+  sudo tar --owner=root --group=root -czf /tmp/rpi5-install.tar.gz .
+  rm -rf /tmp/rpi5-build /tmp/rpi5-build-src.tar.gz
+'
+scp radio@<node-ip>:/tmp/rpi5-install.tar.gz rpi5/rpi5-install.tar.gz
+```
+
+Verify before releasing:
+```bash
+# Paths must start with ./usr/, ./etc/ — NOT rpi5/rpi5-install/usr/
+tar -tzf rpi5-install.tar.gz | head -5
+
+# Ownership must be root/root
+tar -tvzf rpi5-install.tar.gz | head -5
+
+# Symlinks must be real symlinks (lrwxrwxrwx)
+tar -tvzf rpi5-install.tar.gz | grep "^l"
+```
+
+Building from the parent directory creates a path prefix and scripts end up at `/rpi5-install/` instead of `/`.
 
 **IMPORTANT — Windows git symlinks:** The repo must be cloned with `core.symlinks=true` (set in `.git/config`). Without it, git on Windows stores symlinks as plain text files. Symlinks in `etc/systemd/system/multi-user.target.wants/` and `timers.target.wants/` must be real symlinks (mode `120000`) — if they end up as text files in the tarball, systemd silently ignores them and the services are never enabled after provisioning. Verify with:
 ```bash
