@@ -1,5 +1,64 @@
 # MANET Change History
 
+## 2026-04-28
+
+### Refactor: mDNS stack zamijenjen dnsmasq statičkim entryjima
+
+`mumble.local` i `mtx.local` su ranije rješavani putem `mesh-mdns-publisher.py` (python3-zeroconf), što je bilo nepouzdano na Androidu i zahtijevalo Python runtime servis. `manet.local` i `perf.local` su bili duplicirani u dnsmasq i avahi/hosts putem `mesh-mdns-update.sh`.
+
+Sva 4 `.local` imena sada žive isključivo u `/etc/dnsmasq.d/mesh-eud.conf`, koji generira `mesh-ip-manager.sh` pri svakoj IP alokaciji:
+
+```
+address=/manet.local/<node-ip>      per-node
+address=/perf.local/<node-ip>       per-node
+address=/mumble.local/<HostMin+2>   VIP, derived from ipv4_network in mesh.conf
+address=/mtx.local/<HostMin+1>      VIP, derived from ipv4_network in mesh.conf
+```
+
+Service VIP-ovi se računaju iz `ipv4_network` istom `HostMin+N` formulom kao i election skripte — nema hardkodiranih IP adresa.
+
+Uklonjeno: `mesh-mdns-publisher.py`, `mesh-mdns-update.sh`, njihovi systemd unitovi i `wants/` symlinkovi. `mdns-isolate.service` (ebtables blok mDNS prometa na bat0) ostaje.
+
+Deployano na sva 4 noda. Verifikovano grep-om na `/etc/dnsmasq.d/mesh-eud.conf`.
+
+---
+
+### Fix: tarball build procedura — root ownership + Linux obavezno
+
+Tarball izgrađen na Windowsu imao je `radio:radio` ownership na svim fajlovima umjesto `root:root`. Također, Git Bash na Windowsu ne može kreirati symlinke čak i s `core.symlinks=true`, pa `tar` na Windows-u producira tarball s pokvarenim symlinkovama u `multi-user.target.wants/`.
+
+**Ispravna komanda (na Linux nodu):**
+```bash
+cd rpi5/rpi5-install
+sudo tar --owner=root --group=root -czf ../rpi5-install.tar.gz .
+```
+
+**Windows workflow:** `git archive` → gzip → scp na node → strip-components extract → `sudo tar --owner=root --group=root` rebuild → scp nazad.
+
+Dokumentovano u `handover.md` s verifikacijskim komandama.
+
+---
+
+### Istraga: mesh-f86f periodični reboot — uzrok nije definitivan
+
+Node mesh-f86f (`10.30.2.182`) se periodično resetuje. Istraga nije pronašla definitivan uzrok jer nema perzistentnog journala ni pstore crash dumpa.
+
+**Prikupljeni dokazi:**
+- EXT4 journal recovery pri bootu → prethodni shutdown je bio unclean (hard reset, ne clean reboot)
+- `systemd[1]: Watchdog running with a hardware timeout of 1min` → hardware watchdog aktivan
+- `throttled=0x0` → firmware nije detektovao podnapon
+- Nema OOM, nema kernel panic dumpa u pstore, temperatura OK (48.8°C)
+- `man-db.timer: Not using persistent file timestamp Mon 2026-04-27 19:15:38 BST as it is in the future` → potvrđuje prethodni boot s ispravnim NTP vremenom, dakle reboot se desio između 19:15 i 22:56 BST
+
+**Najvjerojatniji uzrok:** kernel hang → watchdog (1 min) resetuje sistem. `morse_usb` HaLow adapter traži `MxPwr=500mA` (maksimum USB 2.0 porta) — USB timeout može blokirati kernel I/O threadove, što sprečava systemd da feedi watchdog.
+
+**Poduzeto:** Aktiviran perzistentni journal (`mkdir -p /var/log/journal`). Nakon sljedećeg reboota, pokrenuti:
+```bash
+sudo journalctl -b -1 --no-pager | tail -80
+```
+
+---
+
 ## 2026-04-27
 
 ### Fix: perf.local login forma submitala na prvom unesenom slovu

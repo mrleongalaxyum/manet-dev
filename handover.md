@@ -15,6 +15,16 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 
 **Current active branch:** `master`
 
+## 2026-04-28 quick state
+
+- **mDNS stack removed.** `mumble.local`, `mtx.local`, `manet.local`, `perf.local` now resolved exclusively via dnsmasq `address=/` entries in `/etc/dnsmasq.d/mesh-eud.conf`. No avahi/zeroconf dependencies remain for name resolution.
+- **Service VIP formula:** `HostMin+1` = MediaMTX VIP (`mtx.local`), `HostMin+2` = Mumble VIP (`mumble.local`). VIPs are deterministic from `ipv4_network` in `/etc/mesh.conf` — same formula in election scripts and dnsmasq config.
+- **Election incumbency bug fixed.** Both `mediamtx-election.sh` and `mumble-election.sh` now read incumbent from Alfred registry (`IS_MEDIAMTX_SERVER='true'` / `IS_MUMBLE_SERVER='true'`) instead of checking local VIP presence. Deployed to all 4 nodes. Confirmed winner: mesh-78f7.
+- **mesh-f86f periodic reboot — investigation ongoing.** No crash dump, no OOM, no pstore. Likely cause: kernel hang → 1-min hardware watchdog reset. Possible culprit: `morse_usb` USB HaLow adapter requesting 500 mA causing USB timeout. Persistent journal activated (`/var/log/journal/`). After next reboot, run `sudo journalctl -b -1 --no-pager | tail -80`.
+- **Tarball must be built on Linux** with `sudo tar --owner=root --group=root`. See tarball packaging section above.
+
+---
+
 ## 2026-04-22 quick state
 
 - `perf.local` now gets radio link summaries through Alfred gossip instead of direct cross-mesh polling.
@@ -137,17 +147,22 @@ Check with: `systemctl status batman-enslave node-manager`
 
 AP interface (non-mesh, for EUD hotspot) varies per node — stored at runtime in `/var/lib/ap_interface`. Non-mesh interfaces listed in `/var/lib/no_mesh_if`. Do **not** assume `wlan3` — always read from these files.
 
-### mDNS — manet.local
+### .local name resolution
 
-EUD clients connected to the node's AP can open `http://manet.local` to reach the admin panel (port 80).
+EUD clients get all `.local` names resolved via dnsmasq (EUD DNS server via DHCP option 6). **No mDNS/zeroconf/avahi involved** — all four names are static `address=/` entries in `/etc/dnsmasq.d/mesh-eud.conf`, written by `mesh-ip-manager.sh` at IP allocation time:
 
-**Implementation:** dnsmasq (already the EUD DNS server via DHCP option 6) answers `manet.local` queries with the node's own IP. This is set in `/etc/dnsmasq.d/mesh-eud.conf` as `address=/manet.local/<gateway_ip>`, written by `mesh-ip-manager.sh` when the node gets its IP chunk.
+| Name | Resolves to | Notes |
+|------|-------------|-------|
+| `manet.local` | node's own br0 IP | per-node, changes if IP chunk changes |
+| `perf.local` | node's own br0 IP | per-node |
+| `mumble.local` | HostMin+2 of ipv4_network | stable VIP — same on every node |
+| `mtx.local` | HostMin+1 of ipv4_network | stable VIP — same on every node |
 
-- No avahi dependency for name resolution — dnsmasq handles it directly
-- avahi-daemon is still installed and restricted to the AP interface (`allow-interfaces=<ap_if>` from `/var/lib/no_mesh_if`) to avoid hostname conflicts over the shared mesh L2 domain
-- Source files in tarball: `usr/local/share/manet/avahi-daemon.conf` and `manet-http.service`
+VIP formula: `ipv4_network` read from `/etc/mesh.conf`, then `ipcalc` → `HostMin` → `+1`/`+2`. Same formula as `mumble-election.sh` and `mediamtx-election.sh`.
 
-**Why not avahi alone:** All nodes share `br0` L2 (bat0 is bridged into br0). Avahi on br0 causes hostname conflicts (`manet-2`, `manet-3`...). Avahi on `wlan3` alone has no IPv4 (bridge slave). dnsmasq is the correct layer.
+**What was removed (2026-04-28):** `mesh-mdns-publisher.py` (python3-zeroconf), `mesh-mdns-update.sh`, their systemd units and `wants/` symlinks. `mdns-isolate.service` (ebtables mDNS block on bat0) is retained.
+
+**Why dnsmasq over mDNS:** mDNS was unreliable on Android. python3-zeroconf required a Python runtime service. Duplicate entries existed in avahi+dnsmasq causing update races. dnsmasq static entries are instant, zero-dependency, and identical on all nodes.
 
 ### Admin panel (mesh-status.py) — features
 
