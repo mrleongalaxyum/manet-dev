@@ -1,5 +1,31 @@
 # MANET Change History
 
+## 2026-04-29
+
+### Fix: Syncthing state directory missing after reprovisioning
+
+After SD-card reprovisioning, `syncthing@radio.service` failed on all nodes with:
+
+```
+Failed to acquire lock: open /home/radio/.local/state/syncthing/syncthing.lock: no such file or directory
+```
+
+**Root cause:** `radio-setup.sh` generated `/home/radio/.config/syncthing`, but did not create Syncthing's state directory before the systemd service started.
+
+**Fix:** `radio-setup.sh` now creates the state directory during first-run setup:
+
+```bash
+install -d -o radio -g radio -m 700 /home/radio/.local/state/syncthing
+```
+
+The fixed image is released as `v0.24-syncthing-state` with `rpi5-install.tar.gz` packed as root-owned entries and root-relative archive contents.
+
+### Note: first-run radio setup ordering
+
+During reprovisioning, two nodes reached `multi-user.target` before `radio-setup-run-once.service` generated `/etc/default/mesh` and WPA config files. The external `very-srs/MANET` provisioning template was updated so the first-run unit runs before `batman-enslave.service`, `node-manager.service`, `mesh-status.service`, and `perf-dashboard.service`.
+
+---
+
 ## 2026-04-28
 
 ### Refactor: mDNS stack zamijenjen dnsmasq statičkim entryjima

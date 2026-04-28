@@ -15,6 +15,14 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 
 **Current active branch:** `master`
 
+## 2026-04-29 quick state
+
+- **Syncthing first-boot fix baked into image.** `radio-setup.sh` now creates `/home/radio/.local/state/syncthing` as `radio:radio` before running `syncthing -generate`, preventing first-boot `syncthing.lock: no such file or directory` failures after reprovisioning.
+- **New tarball release:** v0.24-syncthing-state. Built from `git archive HEAD:rpi5/rpi5-install`, extracted under Linux/WSL to preserve symlinks, then packed with `tar --owner=root --group=root` so the archive extracts directly into `/`.
+- **First-run ordering note:** the external `very-srs/MANET` provisioning template was also fixed so `radio-setup-run-once.service` runs before mesh runtime services instead of waiting for `multi-user.target`.
+
+---
+
 ## 2026-04-28 quick state
 
 - **mDNS stack removed.** `mumble.local`, `mtx.local`, `manet.local`, `perf.local` now resolved exclusively via dnsmasq `address=/` entries in `/etc/dnsmasq.d/mesh-eud.conf`. No avahi/zeroconf dependencies remain for name resolution.
@@ -69,7 +77,7 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 
 Tarball releases are published as GitHub Release artifacts:
 - **Latest:** https://github.com/mrleongalaxyum/manet-dev/releases/latest
-- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.22-halow-24dbm
+- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.24-syncthing-state
 
 ---
 
