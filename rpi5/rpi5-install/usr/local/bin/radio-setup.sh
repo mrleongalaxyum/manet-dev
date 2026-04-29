@@ -1548,11 +1548,15 @@ START_DAEMON="true"
 USBAUTO="true"
 GPSD_CONF
 
-# Patch chrony.conf — add SHM 0 refclock and IPv4 mesh allow if absent.
-CHRONY_CONF="/etc/chrony/chrony.conf"
-if [ -f "$CHRONY_CONF" ]; then
-    if ! grep -q 'refclock SHM 0' "$CHRONY_CONF"; then
-        cat >> "$CHRONY_CONF" <<'CHRONY_GPS'
+# Patch chrony configs — add SHM 0 refclock and IPv4 mesh allow if absent.
+# ethernet-autodetect.sh can replace chrony.conf from these templates, so all
+# available templates must carry the GPS/mesh-NTP additions too.
+ensure_chrony_gps_config() {
+    local conf="$1"
+    [ -f "$conf" ] || return 0
+
+    if ! grep -q 'refclock SHM 0' "$conf"; then
+        cat >> "$conf" <<'CHRONY_GPS'
 
 # GPS SHM refclock — populated by gpsd when a GPS dongle is present.
 # SHM 0 = NMEA sentences (~100 ms accuracy, stratum 0 source).
@@ -1560,15 +1564,24 @@ if [ -f "$CHRONY_CONF" ]; then
 # unreachable and chrony ignores it transparently.
 refclock SHM 0 refid GPS precision 1e-1 delay 0.2 poll 4 offset 0.0
 CHRONY_GPS
-        echo " > chrony: SHM 0 refclock added"
+        echo " > chrony: SHM 0 refclock added to $conf"
     fi
-    if ! grep -q 'allow 10\.30\.2\.' "$CHRONY_CONF"; then
-        echo "allow 10.30.2.0/24" >> "$CHRONY_CONF"
-        echo " > chrony: allow 10.30.2.0/24 added"
+    if ! grep -q 'allow 10\.30\.2\.' "$conf"; then
+        echo "allow 10.30.2.0/24" >> "$conf"
+        echo " > chrony: allow 10.30.2.0/24 added to $conf"
     fi
-fi
+}
+
+for chrony_conf in \
+    /etc/chrony/chrony.conf \
+    /etc/chrony/chrony-default.conf \
+    /etc/chrony/chrony-server.conf \
+    /etc/chrony/chrony-test.conf; do
+    ensure_chrony_gps_config "$chrony_conf"
+done
 
 systemctl enable gps-reader.service
+systemctl restart gps-reader.service 2>/dev/null || true
 systemctl restart chrony 2>/dev/null || true
 
 # ============================================================================

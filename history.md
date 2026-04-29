@@ -713,3 +713,11 @@ Svi 4 nodovi imaju ethernet u lab setupu. Mesh IP-ovi:
 | mesh-f86f  | 192.168.1.51   | 10.30.2.205             |
 | mesh-78f7  | 192.168.1.53   | 10.30.2.117             |
 | mesh-78f3  | 192.168.1.198  | 10.30.2.29              |
+
+### 2026-04-29 - GPS/NTP local follow-up
+
+- Root workspace review found new GPS files under `manet-dev/rpi5/rpi5-install`: `gps-reader.py`, `gps-reader.service`, GPS args in `encoder.py`, GPS reads in all `node-manager*.sh`, and GPS/chrony setup in `radio-setup.sh`.
+- Completed the missing protobuf receive path locally: `decoder.py` now emits `GPS_LATITUDE`, `GPS_LONGITUDE`, and `GPS_ALTITUDE` from existing `NodeInfo.location`; `mesh-registry-builder.sh` now writes those fields into `/var/run/mesh_node_registry`.
+- Hardened `radio-setup.sh` chrony setup: GPS SHM refclock and `allow 10.30.2.0/24` are now applied to active `chrony.conf` and to `chrony-default.conf`, `chrony-server.conf`, and `chrony-test.conf` templates when present, so `ethernet-autodetect.sh` does not wipe GPS NTP on later config swaps.
+- `radio-setup.sh` now restarts `gps-reader.service` after enabling it so `/run/gps_status.json` is populated immediately after provisioning.
+- Follow-up for Claude: validate the full end-to-end GPS payload on nodes after reprovision (`gpsd` -> `/run/gps_status.json` -> Alfred protobuf -> registry -> dashboard), and decide whether GPS `refclock SHM 0` should initially be `noselect` during field validation.

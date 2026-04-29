@@ -426,3 +426,14 @@ For change history and bug log see [history.md](history.md).
 - `mesh-status.py`: `tq` za lokalni (self) node je postavljen na `None` umjesto `255` (batman ne računa TQ prema sebi); TQ badge u node listi se za THIS NODE uopće ne prikazuje.
 - `mesh-status.py`: header local time (`hdr-time`) sada tece svake sekunde kroz `setInterval(tickLocalTime, 1000)` umjesto da stoji na zamrznutom server timestampu.
 - Live patch deploy na sve 4 nodova kroz mesh-f86f (192.168.1.51) kao jump host.
+
+### 2026-04-29 - GPS/NTP implementation handoff
+
+- Local GPS implementation lives in `manet-dev/rpi5/rpi5-install`, not in `.manet-dev-head-install` or `MANET-upstream`.
+- Existing protobuf already has `NodeInfo.location` with `latitude`, `longitude`, and `altitude`; do not add a new protobuf field for basic location.
+- `gps-reader.py` queries local `gpsd` JSON on `127.0.0.1:2947` and writes `/run/gps_status.json` with `has_fix`, `latitude`, `longitude`, `altitude`, `hdop`, and `timestamp`.
+- `node-manager.sh`, `node-manager-static.sh`, and `node-manager-acs.sh` read `/run/gps_status.json` and pass `--latitude`, `--longitude`, `--altitude` into `encoder.py` only when `has_fix` is true.
+- Local follow-up completed: `decoder.py` now emits `GPS_LATITUDE`, `GPS_LONGITUDE`, `GPS_ALTITUDE`; `mesh-registry-builder.sh` now persists those fields into `/var/run/mesh_node_registry`, which matches what `mesh-status.py` already expects.
+- `radio-setup.sh` installs `gpsd gpsd-clients`, writes `/etc/default/gpsd` with `USBAUTO=true` and `GPSD_OPTIONS="-n"`, enables/restarts `gps-reader.service`, and applies chrony GPS config to active and template chrony configs if present.
+- Important risk for Claude to verify: `ethernet-autodetect.sh` copies `/etc/chrony/chrony-test.conf`, `chrony-server.conf`, or `chrony-default.conf` over `chrony.conf`; therefore every chrony template must keep the GPS `refclock SHM 0` and mesh `allow 10.30.2.0/24` additions.
+- Test plan after reprovision: confirm u-blox appears as `/dev/ttyACM0`, `gpsd` sees TPV messages, `/run/gps_status.json` flips `has_fix=true`, `alfred -r 68` decodes to GPS fields, `/var/run/mesh_node_registry` contains `NODE_*_GPS_*`, dashboard shows GPS, and `chronyc sources -n` shows GPS plus network/mesh fallback.
