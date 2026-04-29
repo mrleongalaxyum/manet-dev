@@ -364,3 +364,10 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
 - Button styling je usklađen s temom: primary/action gumbi koriste FER žutu, sekundarni deep-blue/outline, destruktivne akcije ostaju crvene ali bez pastelnog alert izgleda.
 - Status pillovi poput `INET OK` su smireni na neutralnu površinu s diskretnim status rubom da ne iskaču iz teme.
 - Auto-refresh ostaje periodički i ne prekida aktivno editiranje input/select polja.
+## 2026-04-29 provisioning/tarball note
+
+- Latest install release is `v0.27-provisioning-lf` on `mrleongalaxyum/manet-dev`.
+- Use release asset `rpi5-install.tar.gz`; SHA256 `b4e224c720f671f02af9af0ea5daa6018149d74531cbd23d4d38cca791d44bd4`.
+- Tarball was rebuilt from WSL/Linux using `git archive HEAD:rpi5/rpi5-install` into a staging directory, then `tar --owner=root --group=root --numeric-owner -czvf ... .`, so entries start at `./` and extract directly into `/`.
+- Do not rebuild measurement/provisioning tarballs from the Windows worktree; previous latest release had CRLF in runtime files and broke `radio-setup-run-once.service` with `203/EXEC`.
+- `radio-setup.sh` now leaves `radio-setup-run-once.service` enabled across the interface-rename reboot and only disables it after writing `/var/lib/radio-setup.done`.

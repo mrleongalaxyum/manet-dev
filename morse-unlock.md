@@ -753,3 +753,9 @@ mesh-78f7: /root/mt76-module-backups/mt7915e.ko.xz.20260420-223803.pre-official2
 mesh-78f3: /root/mt76-module-backups/mt7915e.ko.xz.20260420-223714.pre-official24
 mesh-7946: /root/mt76-module-backups/mt7915e.ko.xz.20260420-223714.pre-official24
 ```
+## 2026-04-29 Provisioning Packaging Note
+
+- Current release asset is `v0.27-provisioning-lf/rpi5-install.tar.gz`, SHA256 `b4e224c720f671f02af9af0ea5daa6018149d74531cbd23d4d38cca791d44bd4`.
+- The tarball must be produced from Linux/WSL staging with `tar --owner=root --group=root --numeric-owner -czvf ... .` from inside the staged `rpi5-install` root, not from the Windows worktree.
+- This matters for the radio stack because CRLF in `/usr/local/bin/radio-setup.sh` prevented provisioning from executing, and broken symlinks in `multi-user.target.wants/` can prevent systemd services such as `manet-txpower.service` from enabling after reprovision.
+- `radio-setup.sh` now completes the interface-rename reboot flow before disabling `radio-setup-run-once.service`, then writes `/var/lib/radio-setup.done`.

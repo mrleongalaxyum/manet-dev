@@ -721,3 +721,12 @@ Svi 4 nodovi imaju ethernet u lab setupu. Mesh IP-ovi:
 - Hardened `radio-setup.sh` chrony setup: GPS SHM refclock and `allow 10.30.2.0/24` are now applied to active `chrony.conf` and to `chrony-default.conf`, `chrony-server.conf`, and `chrony-test.conf` templates when present, so `ethernet-autodetect.sh` does not wipe GPS NTP on later config swaps.
 - `radio-setup.sh` now restarts `gps-reader.service` after enabling it so `/run/gps_status.json` is populated immediately after provisioning.
 - Follow-up for Claude: validate the full end-to-end GPS payload on nodes after reprovision (`gpsd` -> `/run/gps_status.json` -> Alfred protobuf -> registry -> dashboard), and decide whether GPS `refclock SHM 0` should initially be `noselect` during field validation.
+### 2026-04-29 - v0.27 provisioning LF/root tar fix
+
+- Reprovisioning root cause: release tar built from a Windows checkout introduced CRLF into Linux runtime files. On nodes, `/usr/local/bin/radio-setup.sh` had `#!/bin/bash\r\n`, causing `radio-setup-run-once.service` to fail with `status=203/EXEC`; `/etc/sudoers.d/perf` also had CRLF and failed `visudo`.
+- Added `.gitattributes` in commit `fcc0c7c` to force LF for shell/python/systemd/conf/proto/runtime text files and keep firmware/modules/archives binary.
+- Fixed a second provisioning completion bug in commit `098b12b`: `radio-setup.sh` no longer disables `radio-setup-run-once.service` before the interface-rename reboot. It keeps the unit enabled through the post-reboot pass, then writes `/var/lib/radio-setup.done` and disables the unit.
+- Deleted previous latest release `v0.26-gps` and published `v0.27-provisioning-lf` on `mrleongalaxyum/manet-dev`.
+- New asset: `rpi5-install.tar.gz`, SHA256 `b4e224c720f671f02af9af0ea5daa6018149d74531cbd23d4d38cca791d44bd4`.
+- Tar packaging method: WSL/Linux staging from `git archive HEAD:rpi5/rpi5-install`, then `tar --owner=root --group=root --numeric-owner -czvf ... .`; archive entries start at `./` and extract directly into `/`, with root/root ownership and preserved systemd symlinks.
+- Live node recovery: `mesh-78f7`, `mesh-7946`, and `mesh-f86f` reached `radio-setup-run-once.service inactive/disabled` with `/var/lib/radio-setup.done`. `mesh-78f3` was pingable but SSH timed out during banner exchange during the last check, so it needs one more post-reboot SSH verification.

@@ -437,3 +437,12 @@ For change history and bug log see [history.md](history.md).
 - `radio-setup.sh` installs `gpsd gpsd-clients`, writes `/etc/default/gpsd` with `USBAUTO=true` and `GPSD_OPTIONS="-n"`, enables/restarts `gps-reader.service`, and applies chrony GPS config to active and template chrony configs if present.
 - Important risk for Claude to verify: `ethernet-autodetect.sh` copies `/etc/chrony/chrony-test.conf`, `chrony-server.conf`, or `chrony-default.conf` over `chrony.conf`; therefore every chrony template must keep the GPS `refclock SHM 0` and mesh `allow 10.30.2.0/24` additions.
 - Test plan after reprovision: confirm u-blox appears as `/dev/ttyACM0`, `gpsd` sees TPV messages, `/run/gps_status.json` flips `has_fix=true`, `alfred -r 68` decodes to GPS fields, `/var/run/mesh_node_registry` contains `NODE_*_GPS_*`, dashboard shows GPS, and `chronyc sources -n` shows GPS plus network/mesh fallback.
+### 2026-04-29 - Provisioning release state
+
+- Current latest release on `mrleongalaxyum/manet-dev`: `v0.27-provisioning-lf`.
+- Asset: `rpi5-install.tar.gz`.
+- SHA256: `b4e224c720f671f02af9af0ea5daa6018149d74531cbd23d4d38cca791d44bd4`.
+- Source commits pushed to `master`: `fcc0c7c` (`.gitattributes` LF enforcement) and `098b12b` (`radio-setup-run-once` post-reboot completion fix).
+- Correct packaging command shape: build from Linux/WSL staging rooted at `rpi5/rpi5-install`, then run `tar --owner=root --group=root --numeric-owner -czvf rpi5-install.tar.gz .`. Do not package from the Windows working tree, because CRLF and symlink materialization can break provisioning.
+- Provisioning bug fixed: first run previously disabled `radio-setup-run-once.service` and then rebooted, so the expected post-reboot pass never ran. The script now keeps the unit enabled until the post-reboot pass completes, then creates `/var/lib/radio-setup.done` and disables the unit.
+- Live check after patch: `mesh-78f7`, `mesh-7946`, and `mesh-f86f` finished with `radio-setup-run-once.service inactive/disabled` and `/var/lib/radio-setup.done`. `mesh-78f3` still needs final SSH verification; it replied to ping but timed out during SSH banner exchange.
