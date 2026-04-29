@@ -18,8 +18,8 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 ## 2026-04-29 quick state
 
 - **Syncthing first-boot fix baked into image.** `radio-setup.sh` now creates `/home/radio/.local/state/syncthing` as `radio:radio` before running `syncthing -generate`, preventing first-boot `syncthing.lock: no such file or directory` failures after reprovisioning.
-- **New tarball release:** v0.24-syncthing-state. Built from `git archive HEAD:rpi5/rpi5-install`, extracted under Linux/WSL to preserve symlinks, then packed with `tar --owner=root --group=root` so the archive extracts directly into `/`.
-- **First-run ordering note:** the external `very-srs/MANET` provisioning template was also fixed so `radio-setup-run-once.service` runs before mesh runtime services instead of waiting for `multi-user.target`.
+- **New tarball release:** v0.25-txpower-verify (mesh-status.py + perf-dashboard.py now read back `iw dev <iface> info` after each TX power apply and surface the actual reported value). Built from `git archive HEAD:rpi5/rpi5-install`, extracted under Linux/WSL to preserve symlinks, then packed with `tar --owner=root --group=root` so the archive extracts directly into `/`.
+- **Release asset naming is load-bearing.** Upstream `provision-mesh.sh` (in the SD-card image, sourced from `very-srs/MANET`) greps `releases/latest` for `"browser_download_url": "...rpi5-install\.tar\.gz"` — versioned filenames like `rpi5-install-v0.25-...tar.gz` do **not** match and break first-boot provisioning silently. Always upload the asset as bare `rpi5-install.tar.gz`.
 
 ---
 
@@ -77,7 +77,7 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 
 Tarball releases are published as GitHub Release artifacts:
 - **Latest:** https://github.com/mrleongalaxyum/manet-dev/releases/latest
-- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.24-syncthing-state
+- **Current:** https://github.com/mrleongalaxyum/manet-dev/releases/tag/v0.25-txpower-verify
 
 ---
 

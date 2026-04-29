@@ -20,9 +20,30 @@ install -d -o radio -g radio -m 700 /home/radio/.local/state/syncthing
 
 The fixed image is released as `v0.24-syncthing-state` with `rpi5-install.tar.gz` packed as root-owned entries and root-relative archive contents.
 
-### Note: first-run radio setup ordering
+### Fix: GitHub release asset naming broke first-boot provisioning
 
-During reprovisioning, two nodes reached `multi-user.target` before `radio-setup-run-once.service` generated `/etc/default/mesh` and WPA config files. The external `very-srs/MANET` provisioning template was updated so the first-run unit runs before `batman-enslave.service`, `node-manager.service`, `mesh-status.service`, and `perf-dashboard.service`.
+Three of four nodes ended up at default hostname `raspberrypi` with no `br0`/`bat0`/`wlan2` and `mesh-provision.service` failed. Root cause: the v0.25 release asset was uploaded as `rpi5-install-v0.25-txpower-verify.tar.gz`, but `provision-mesh.sh` (from upstream `very-srs/MANET` SD-card image template) greps `releases/latest` strictly for `rpi5-install\.tar\.gz`:
+
+```bash
+RPI5_URL=$(curl -s https://api.github.com/repos/mrleongalaxyum/manet-dev/releases/latest \
+    | grep -o '"browser_download_url": *"[^"]*rpi5-install\.tar\.gz"' \
+    | grep -o 'https://[^"]*')
+```
+
+The versioned suffix didn't match, `RPI5_URL` was empty, the script exited 1, nothing else ran. Three nodes that picked v0.25 as "latest" never got their tarball, never ran `radio-setup.sh`, never built `br0`/`bat0`. Journal on each broken node:
+
+```
+ERROR: Could not resolve rpi5-install.tar.gz from latest release
+mesh-provision.service: Failed with result 'exit-code'.
+```
+
+**Fix:** v0.25 asset re-uploaded as bare `rpi5-install.tar.gz`. After re-upload, broken nodes recovered with `systemctl restart mesh-provision.service`.
+
+**Lesson:** the asset name is load-bearing for first-boot provisioning. Always upload as `rpi5-install.tar.gz`, never with a versioned suffix.
+
+### Revert: bogus `Before=` claim about radio-setup-run-once
+
+A previous note claimed `radio-setup-run-once.service` was given `Before=batman-enslave.service node-manager.service mesh-status.service perf-dashboard.service` to fix an ordering race. That framing is wrong — `radio-setup.sh` is what **creates** those `.service` files (heredoc writes at lines 1239/1280/1455 of `radio-setup.sh` overwriting the baseline copies shipped in the tarball). The `Before=` directive in the upstream `firstrun.sh.template` doesn't reflect a real dependency between radio-setup and pre-existing services; it's at most a workaround for the fact that runtime services don't carry `After=radio-setup-run-once.service` themselves. Removing the claim from this changelog and proposing upstream cleanup separately.
 
 ---
 
