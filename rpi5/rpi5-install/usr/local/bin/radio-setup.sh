@@ -1588,15 +1588,19 @@ systemctl restart chrony 2>/dev/null || true
 # === FIRST RUN vs RE-RUN ===
 # ============================================================================
 
-# Determine if this script is being run for the first time
-# and reboot if so to pick up the changes to the interfaces
+# Determine if this script is being run by the first-boot systemd unit. When
+# interface renames are staged, keep the unit enabled until the post-reboot run
+# finishes; disabling before that leaves provisioning half-complete.
+FIRST_BOOT_UNIT_ENABLED=0
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
+    FIRST_BOOT_UNIT_ENABLED=1
+fi
+FIRST_BOOT_STAGE_MARKER="/var/lib/radio-setup-first-stage.done"
+
+if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; then
     apt remove -y network-manager
     systemctl mask rpi-eeprom-update.service
     systemctl set-default multi-user.target
-
-    echo " >> Removing radio-setup-run-once.service"
-    systemctl disable radio-setup-run-once.service
 
     echo " >> Doing initial Syncthing config..."
     install -d -o radio -g radio -m 700 /home/radio/.local/state/syncthing
@@ -1612,7 +1616,7 @@ if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
     sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
     sed -i 's|<gui enabled="true" tls="false" debugging="false">.*</gui>|<gui enabled="true" tls="false" debugging="false">\n        <address>127.0.0.1:8384</address>\n    </gui>|' "$SYNCTHING_CONFIG"
     echo " -- CONFIGURED -- " >> /etc/issue
-    reboot
+    touch "$FIRST_BOOT_STAGE_MARKER"
 fi
 
 echo " > restarting networkd..."
@@ -1653,4 +1657,11 @@ if [ -f /var/lib/radio-setup-reboot-pending ]; then
     echo "=================================================="
     sleep 5
     reboot
+fi
+
+if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 ]]; then
+    echo " >> Removing radio-setup-run-once.service"
+    systemctl disable radio-setup-run-once.service
+    rm -f "$FIRST_BOOT_STAGE_MARKER"
+    touch /var/lib/radio-setup.done
 fi
