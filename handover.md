@@ -17,6 +17,7 @@ batman-adv aggregates all 3 radios into `bat0`. `bat0` is bridged into `br0`. Ea
 
 ## 2026-04-29 quick state
 
+- **GPS (u-blox 7 USB) implemented.** All 4 nodes have a u-blox 7 dongle (`1546:01a7`) connected. `gps-reader.py` daemon reads location from gpsd every 5 s, writes `/run/gps_status.json`. `encoder.py` now accepts `--latitude/--longitude/--altitude` and populates `NodeInfo.location`. Both `node-manager-static.sh` and `node-manager-acs.sh` read the JSON and pass coordinates to the encoder. `radio-setup.sh` installs gpsd, patches chrony SHM 0 refclock + `allow 10.30.2.0/24`. chrony already installed; GPS nodes become stratum ~2 NTP source automatically — no election logic change needed. Next release needed to deploy.
 - **Syncthing first-boot fix baked into image.** `radio-setup.sh` now creates `/home/radio/.local/state/syncthing` as `radio:radio` before running `syncthing -generate`, preventing first-boot `syncthing.lock: no such file or directory` failures after reprovisioning.
 - **New tarball release:** v0.25-txpower-verify (mesh-status.py + perf-dashboard.py now read back `iw dev <iface> info` after each TX power apply and surface the actual reported value). Built from `git archive HEAD:rpi5/rpi5-install`, extracted under Linux/WSL to preserve symlinks, then packed with `tar --owner=root --group=root` so the archive extracts directly into `/`.
 - **Release asset naming is load-bearing.** Upstream `provision-mesh.sh` (in the SD-card image, sourced from `very-srs/MANET`) greps `releases/latest` for `"browser_download_url": "...rpi5-install\.tar\.gz"` — versioned filenames like `rpi5-install-v0.25-...tar.gz` do **not** match and break first-boot provisioning silently. Always upload the asset as bare `rpi5-install.tar.gz`.
@@ -132,6 +133,7 @@ ssh -J radio@192.168.1.53 radio@10.30.2.28    # reach mesh-78f3 via mesh-78f7
 | `ethernet-autodetect.sh` | Detects ethernet plug/unplug and promotes/demotes node as mesh gateway. |
 | `sae-watchdog.sh` | Monitors for SAE auth blocks and restarts wpa_supplicant if bat0 loses interfaces. |
 | `battery-reader.py` | Reads Waveshare UPS HAT (E) IP2368 MCU at I2C `0x2D` every 30s. Writes `/run/battery_status.json`. Triggers poweroff if any cell < 3150 mV while discharging. |
+| `gps-reader.py` | Reads GPS fix from gpsd every 5 s. Writes `/run/gps_status.json` (`has_fix`, `latitude`, `longitude`, `altitude`, `hdop`). Writes `has_fix=false` safely when gpsd is absent or device not plugged in. |
 | `mesh-status.py` | Web admin panel on **port 80**. Shows topology canvas, local battery fuel gauge + peer battery % from alfred registry. Peer proxy fetch via `/api/peer/<ip>`. |
 
 ### Systemd unit names (post-reprovisioning)

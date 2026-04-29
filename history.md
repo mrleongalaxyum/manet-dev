@@ -2,6 +2,24 @@
 
 ## 2026-04-29
 
+### Feature: GPS location + NTP via u-blox 7 USB dongle
+
+All 4 nodes have a u-blox 7 USB GPS receiver (`VID 1546:01a7`) connected.
+
+**New files:**
+- `usr/local/bin/gps-reader.py` — daemon that queries gpsd via JSON protocol on `127.0.0.1:2947`, extracts the first TPV message, and writes `/run/gps_status.json` every 5 s. Fields: `has_fix` (bool), `latitude`, `longitude`, `altitude` (float, WGS84), `hdop`, `timestamp`. Writes `has_fix=false` safely when gpsd is unreachable or GPS has no fix — nodes without a dongle are unaffected.
+- `etc/systemd/system/gps-reader.service` — `After=gpsd.service`, `Restart=always`.
+
+**Modified files:**
+- `encoder.py` — `--latitude`, `--longitude`, `--altitude` args populate `NodeInfo.location` (proto field 40, already defined). Only sets location if lat/lon are non-zero (i.e., `has_fix=true`).
+- `node-manager-static.sh` — reads `/run/gps_status.json` before each Alfred publish, appends `--latitude/--longitude/--altitude` to encoder args if `has_fix=true`.
+- `node-manager-acs.sh` — same, in both lobby and data-channel publish blocks.
+- `radio-setup.sh` — installs `gpsd gpsd-clients`; writes `/etc/default/gpsd` (`USBAUTO=true`, `GPSD_OPTIONS="-n"`); appends `refclock SHM 0` to `/etc/chrony/chrony.conf` and `allow 10.30.2.0/24` (idempotent checks); enables `gps-reader.service`; restarts chrony.
+
+**NTP design:** chrony was already installed and serving NTP to the mesh (`allow fd01:ed20:ecb4::/64`, `local stratum 10`). With GPS fix, the SHM 0 refclock gives chrony a stratum-0 source → node advertises at stratum ~2. Other nodes' chrony prefers the lower stratum automatically. No mesh election logic change needed — `is_ntp_server` flag remains tied to ethernet gateway; GPS silently improves time quality mesh-wide. Nodes without GPS or without fix continue at stratum 10.
+
+**Pending:** new tarball release needed to deploy to nodes.
+
 ### Fix: Syncthing state directory missing after reprovisioning
 
 After SD-card reprovisioning, `syncthing@radio.service` failed on all nodes with:

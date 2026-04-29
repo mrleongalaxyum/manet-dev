@@ -1521,6 +1521,57 @@ apt update -qq && apt install -y python3-smbus i2c-tools || true
 systemctl enable battery-reader.service
 
 # ============================================================================
+# === GPS — u-blox USB dongle + chrony SHM NTP ===
+# ============================================================================
+# Supports optional u-blox 7 (USB VID 1546:01a7) GPS receivers.
+# Nodes without a dongle still run gps-reader.service safely — it writes
+# has_fix=false when gpsd is unreachable or has no fix.
+#
+# NTP strategy:
+#   - chrony is already installed and serves the mesh (allow fd01::/64).
+#   - With GPS: SHM 0 refclock (NMEA, ~100 ms accuracy) → stratum ~2.
+#   - Without GPS or fix: chrony falls back to pool.ntp.org or local stratum 10.
+#   - Nodes with GPS automatically become the preferred NTP source because
+#     their chrony stratum beats the stratum-10 fallback of GPS-less nodes.
+#   - No election logic change needed — existing is_ntp_server flag stays
+#     tied to the ethernet gateway; GPS just silently improves time quality.
+
+apt-get install -y gpsd gpsd-clients 2>/dev/null || true
+
+# /etc/default/gpsd — hotplug via gpsd's own udev rules (USBAUTO=true).
+# DEVICES="" means gpsd starts without a fixed device path and picks up
+# any GPS device added after boot through its udev integration.
+cat > /etc/default/gpsd <<'GPSD_CONF'
+DEVICES=""
+GPSD_OPTIONS="-n"
+START_DAEMON="true"
+USBAUTO="true"
+GPSD_CONF
+
+# Patch chrony.conf — add SHM 0 refclock and IPv4 mesh allow if absent.
+CHRONY_CONF="/etc/chrony/chrony.conf"
+if [ -f "$CHRONY_CONF" ]; then
+    if ! grep -q 'refclock SHM 0' "$CHRONY_CONF"; then
+        cat >> "$CHRONY_CONF" <<'CHRONY_GPS'
+
+# GPS SHM refclock — populated by gpsd when a GPS dongle is present.
+# SHM 0 = NMEA sentences (~100 ms accuracy, stratum 0 source).
+# Nodes without a dongle: gpsd is not running so this refclock stays
+# unreachable and chrony ignores it transparently.
+refclock SHM 0 refid GPS precision 1e-1 delay 0.2 poll 4 offset 0.0
+CHRONY_GPS
+        echo " > chrony: SHM 0 refclock added"
+    fi
+    if ! grep -q 'allow 10\.30\.2\.' "$CHRONY_CONF"; then
+        echo "allow 10.30.2.0/24" >> "$CHRONY_CONF"
+        echo " > chrony: allow 10.30.2.0/24 added"
+    fi
+fi
+
+systemctl enable gps-reader.service
+systemctl restart chrony 2>/dev/null || true
+
+# ============================================================================
 # === FIRST RUN vs RE-RUN ===
 # ============================================================================
 
