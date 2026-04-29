@@ -369,5 +369,6 @@ Dashboard mora raditi i kada nodovi **nemaju internet konekciju** (field deploym
 - Latest install release is `v0.27-provisioning-lf` on `mrleongalaxyum/manet-dev`.
 - Use release asset `rpi5-install.tar.gz`; SHA256 `b4e224c720f671f02af9af0ea5daa6018149d74531cbd23d4d38cca791d44bd4`.
 - Tarball was rebuilt from WSL/Linux using `git archive HEAD:rpi5/rpi5-install` into a staging directory, then `tar --owner=root --group=root --numeric-owner -czvf ... .`, so entries start at `./` and extract directly into `/`.
+- Concrete build command, run from inside the staged `rpi5-install` root: `sudo tar --owner=root --group=root --numeric-owner -czvf ~/manet-new/MANET/install_packages/rpi5-install.tar.gz .`
 - Do not rebuild measurement/provisioning tarballs from the Windows worktree; previous latest release had CRLF in runtime files and broke `radio-setup-run-once.service` with `203/EXEC`.
 - `radio-setup.sh` now leaves `radio-setup-run-once.service` enabled across the interface-rename reboot and only disables it after writing `/var/lib/radio-setup.done`.

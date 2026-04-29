@@ -444,5 +444,6 @@ For change history and bug log see [history.md](history.md).
 - SHA256: `b4e224c720f671f02af9af0ea5daa6018149d74531cbd23d4d38cca791d44bd4`.
 - Source commits pushed to `master`: `fcc0c7c` (`.gitattributes` LF enforcement) and `098b12b` (`radio-setup-run-once` post-reboot completion fix).
 - Correct packaging command shape: build from Linux/WSL staging rooted at `rpi5/rpi5-install`, then run `tar --owner=root --group=root --numeric-owner -czvf rpi5-install.tar.gz .`. Do not package from the Windows working tree, because CRLF and symlink materialization can break provisioning.
+- Concrete build command, run while `pwd` is the staged `rpi5-install` root: `sudo tar --owner=root --group=root --numeric-owner -czvf ~/manet-new/MANET/install_packages/rpi5-install.tar.gz .`
 - Provisioning bug fixed: first run previously disabled `radio-setup-run-once.service` and then rebooted, so the expected post-reboot pass never ran. The script now keeps the unit enabled until the post-reboot pass completes, then creates `/var/lib/radio-setup.done` and disables the unit.
 - Live check after patch: `mesh-78f7`, `mesh-7946`, and `mesh-f86f` finished with `radio-setup-run-once.service inactive/disabled` and `/var/lib/radio-setup.done`. `mesh-78f3` still needs final SSH verification; it replied to ping but timed out during SSH banner exchange.
