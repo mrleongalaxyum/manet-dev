@@ -1070,13 +1070,27 @@ def assemble_local_data():
 
     ifaces = enrich_interfaces_with_registry_mcs(ifaces, my_node)
 
-    # GPS — placeholder, will be populated when registry has GPS fields
-    gps = {
-        'available': bool(my_node.get('GPS_LATITUDE')),
-        'lat':       my_node.get('GPS_LATITUDE', ''),
-        'lon':       my_node.get('GPS_LONGITUDE', ''),
-        'alt':       my_node.get('GPS_ALTITUDE', ''),
-    }
+    # GPS — read directly from gps-reader output for freshness; fall back to registry
+    gps = {'available': False, 'lat': '', 'lon': '', 'alt': ''}
+    try:
+        with open('/run/gps_status.json') as _gf:
+            _gd = json.load(_gf)
+        if _gd.get('has_fix'):
+            gps = {
+                'available': True,
+                'lat': str(_gd['latitude']),
+                'lon': str(_gd['longitude']),
+                'alt': str(_gd.get('altitude', '')),
+            }
+    except Exception:
+        pass
+    if not gps['available']:
+        gps = {
+            'available': bool(my_node.get('GPS_LATITUDE')),
+            'lat':       my_node.get('GPS_LATITUDE', ''),
+            'lon':       my_node.get('GPS_LONGITUDE', ''),
+            'alt':       my_node.get('GPS_ALTITUDE', ''),
+        }
 
     return {
         'hostname':  hostname,
@@ -2567,11 +2581,20 @@ function renderPeerDrawer(d, hostname) {
     battHtml = `${pct}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${pct}%;background:${col}"></span></span>${icon}${extra}`;
   }
 
+  let gpsHtml;
+  if (d.gps && d.gps.available) {
+    gpsHtml = `<span class="gps-dot" style="background:var(--good)"></span>${d.gps.lat}, ${d.gps.lon}` +
+              (d.gps.alt ? ` &nbsp;${d.gps.alt}m` : '');
+  } else {
+    gpsHtml = `<span class="gps-dot" style="background:var(--muted)"></span><span style="color:var(--muted)">No fix</span>`;
+  }
+
   const rows = [
     ['Hostname', d.hostname || '—'],
     ['Mesh IP',  d.ip       || '—'],
     ['Uptime',   d.uptime   || '—'],
     ['Battery',  battHtml],
+    ['GPS',      gpsHtml],
     ['EUD Mode', d.eud_mode || '—'],
   ];
   if (d.ap_ssid) rows.push(['AP SSID', d.ap_ssid]);
