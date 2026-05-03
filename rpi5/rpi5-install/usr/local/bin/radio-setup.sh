@@ -1473,25 +1473,7 @@ EOF
 
 systemctl enable mesh-status
 
-# ============================================================================
-# === mDNS — manet.local ===
-# ============================================================================
-# Advertise this node as manet.local on the AP/EUD interface only.
-# avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
-# Clients connected to the EUD AP can reach the admin panel at http://manet.local
-
-apt install -y avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf 2>/dev/null || true
-install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
-cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
-# Restrict avahi to the AP-only interface so nodes on the mesh don't conflict on 'manet'
-AVAHI_AP_IF=$(head -1 /var/lib/no_mesh_if 2>/dev/null)
-if [ -n "$AVAHI_AP_IF" ]; then
-    sed -i "s/allow-interfaces=.*/allow-interfaces=$AVAHI_AP_IF/" /etc/avahi/avahi-daemon.conf
-fi
-cp /usr/local/share/manet/manet-http.service /etc/avahi/services/manet-http.service
-cp /usr/local/share/manet/perf-http.service /etc/avahi/services/perf-http.service 2>/dev/null || true
-systemctl enable avahi-daemon
-systemctl restart avahi-daemon || true
+apt install -y iperf3 traceroute sqlite3 python3-zeroconf 2>/dev/null || true
 
 # ============================================================================
 # === UPS HAT (E) BATTERY MONITOR ===

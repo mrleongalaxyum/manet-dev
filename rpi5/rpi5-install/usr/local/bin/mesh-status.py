@@ -23,6 +23,7 @@ Calls:
 import http.server
 import socketserver
 import json
+import math
 import subprocess
 import re
 import os
@@ -424,6 +425,28 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
         f'TX power command accepted but {iface} is still '
         f'{actual or "unknown"} dBm, expected {requested} dBm'
     )
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    R = 6_371_000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def fmt_distance(m):
+    if m is None:
+        return None
+    if m < 1000:
+        return f'{round(m)} m'
+    return f'{m / 1000:.2f} km'
+
+def gps_from_registry_node(ndata):
+    lat = ndata.get('GPS_LATITUDE', '')
+    lon = ndata.get('GPS_LONGITUDE', '')
+    alt = ndata.get('GPS_ALTITUDE', '')
+    available = bool(lat and lon)
+    return {'available': available, 'lat': lat, 'lon': lon, 'alt': alt}
 
 def parse_registry():
     """Parse /var/run/mesh_node_registry into a dict of node dicts."""
@@ -1170,6 +1193,36 @@ def assemble_status_data():
         selected_gw = norm_mac(best_gw_nd.get('MAC_ADDRESS', ''))
         gateways    = [{'mac': selected_gw, 'tq': 0, 'selected': True}]
 
+    # GPS for THIS NODE — fresh from gps_status.json, fall back to registry
+    self_gps = {'available': False, 'lat': '', 'lon': '', 'alt': ''}
+    try:
+        with open('/run/gps_status.json') as _gf:
+            _gd = json.load(_gf)
+        if _gd.get('has_fix'):
+            self_gps = {
+                'available': True,
+                'lat': str(_gd['latitude']),
+                'lon': str(_gd['longitude']),
+                'alt': str(_gd.get('altitude', '')),
+            }
+    except Exception:
+        pass
+    if not self_gps['available']:
+        for nid_s, nd_s in nodes_raw.items():
+            if (my_mac and norm_mac(nd_s.get('MAC_ADDRESS', '')) == my_mac) or nd_s.get('HOSTNAME', '') == my_host:
+                self_gps = gps_from_registry_node(nd_s)
+                break
+
+    def _distance_from_self(peer_gps):
+        if not self_gps['available'] or not peer_gps['available']:
+            return None, None
+        try:
+            m = haversine_m(float(self_gps['lat']), float(self_gps['lon']),
+                            float(peer_gps['lat']), float(peer_gps['lon']))
+            return round(m, 1), fmt_distance(m)
+        except Exception:
+            return None, None
+
     node_list = []
     self_found = False
 
@@ -1204,6 +1257,12 @@ def assemble_status_data():
         is_direct = any(m in neighbor_macs for m in all_node_macs) or node_mac in neighbor_macs
         gw_info   = gw_mac_map.get(node_mac)
 
+        node_gps = self_gps if is_me else gps_from_registry_node(ndata)
+        if is_me:
+            dist_m, dist_label = 0, '0 m'
+        else:
+            dist_m, dist_label = _distance_from_self(node_gps)
+
         node_list.append({
             'id':           nid,
             'hostname':     hostname,
@@ -1230,6 +1289,9 @@ def assemble_status_data():
             'all_macs':     [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()],
             'hop_count':    None,
             'last_seen':    ndata.get('LAST_REGISTRY_UPDATE', ndata.get('LAST_SEEN_TIMESTAMP', '0')),
+            'gps':                  node_gps,
+            'distance_from_self_m': dist_m,
+            'distance_from_self_label': dist_label,
         })
 
     # If self not in registry, inject a placeholder
@@ -1245,6 +1307,9 @@ def assemble_status_data():
             'mumble': False, 'mediamtx': False, 'ntp': False,
             'state': 'ACTIVE', 'ch_2g': '', 'ch_5g': '', 'limp': False,
             'hop_count': None, 'last_seen': str(int(time.time())),
+            'gps': self_gps,
+            'distance_from_self_m': 0,
+            'distance_from_self_label': '0 m',
         })
 
     node_list.sort(key=lambda n: (not n['is_me'], -(n['tq'] if n['tq'] is not None else -1)))
@@ -1813,6 +1878,8 @@ function renderNodeList(nodes) {
       const icon = (n.battery.charging === true) ? '⚡' : (pct <= 15 ? '⚠' : '');
       battMeta = `<span style="color:${col};font-size:10px">${icon}${pct}%</span>`;
     }
+    const distMeta = (!n.is_me && !nodeStale && n.distance_from_self_label)
+      ? `<span style="color:var(--muted);font-size:10px">&#x25CE; ${n.distance_from_self_label}</span>` : '';
     const offlineBadge = nodeStale ? `<span class="badge badge-tq-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
 
     const expanded = SELECTED_PEER_ID === n.id;
@@ -1821,10 +1888,14 @@ function renderNodeList(nodes) {
         : (PEER_LOADING_ID === n.id
             ? '<div class="peer-loading">FETCHING…</div>'
           : (PEER_DETAIL_CACHE[n.id] || '<div class="peer-loading" style="color:var(--muted)">No details loaded</div>'));
+    const distDetail = (!n.is_me && n.distance_from_self_label)
+      ? `<span style="color:var(--muted);font-size:10px;margin-left:8px">&#x25CE; ${n.distance_from_self_label}</span>` : '';
+    const gpsDetail = (!n.is_me && n.gps && n.gps.available)
+      ? `<span style="color:var(--muted);font-size:10px;margin-left:8px">${n.gps.lat}, ${n.gps.lon}${n.gps.alt ? ' ' + n.gps.alt + 'm' : ''}</span>` : '';
     const detail = expanded ? `<div class="node-inline-detail">
       <div class="inline-detail-head">
         <span class="inline-detail-title">${n.hostname}${n.ip ? '  ' + n.ip : ''}</span>
-        ${n.is_me ? '<span class="self-node-badge">THIS NODE</span>' : ''}
+        ${n.is_me ? '<span class="self-node-badge">THIS NODE</span>' : ''}${distDetail}${gpsDetail}
       </div>
       <div class="inline-detail-body">${detailBody}</div>
     </div>` : '';
@@ -1833,7 +1904,7 @@ function renderNodeList(nodes) {
       <div class="node-summary">
         <div class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
         <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
-        <div class="node-meta">${nodeStale ? offlineBadge : tqBadge+badges.join('')+meta+cpu+battMeta}</div>
+        <div class="node-meta">${nodeStale ? offlineBadge : tqBadge+badges.join('')+meta+cpu+battMeta+distMeta}</div>
         ${bar}
       </div>
       ${detail}
