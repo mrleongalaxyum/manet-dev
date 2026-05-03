@@ -1757,7 +1757,7 @@ function tqPct(tq) {
   return Math.round((tq / 255) * 100);
 }
 function fmtAge(ts) {
-  const secs = Math.floor(Date.now() / 1000) - parseInt(ts || 0);
+  const secs = (DATA ? DATA.timestamp : Math.floor(Date.now() / 1000)) - parseInt(ts || 0);
   if (secs < 60)   return `${secs}s ago`;
   if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
   if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
@@ -1801,7 +1801,7 @@ function renderNodeList(nodes) {
     const thisNodeLabel = n.is_me
       ? `<span class="self-node-badge">THIS NODE</span>`
       : '';
-    const nodeStale = !n.is_me && (Date.now() / 1000) - parseInt(n.last_seen || 0) > 300;
+    const nodeStale = !n.is_me && (DATA.timestamp - parseInt(n.last_seen || 0)) > 300;
     const tqBadge = (n.is_me || nodeStale) ? '' : `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
     const bar = nodeStale ? '' : `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
     const meta = (!nodeStale && n.uptime) ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
@@ -2131,7 +2131,7 @@ function drawTopo() {
   SIM.nodes.forEach(n => {
     const isHover = HOVER_NODE && HOVER_NODE.id === n.id;
     const isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID && SELECTED_PEER_ID === n.id);
-    const nodeStaleCanvas = !n.is_me && (Date.now() / 1000) - parseInt(n.last_seen || 0) > 300;
+    const nodeStaleCanvas = !n.is_me && (DATA.timestamp - parseInt(n.last_seen || 0)) > 300;
     const col = n.is_me ? '#ecb000' : (nodeStaleCanvas ? '#6b7280' : (n.is_gateway ? '#ecb000' : tqColor(n.tq)));
     const r = n.r + (isHover ? 3 : (isSelected ? 2 : 0));
 
@@ -3120,7 +3120,7 @@ function renderStatus(s) {
       dotCls   = 'ack-dot-no';
       ackLabel = 'Waiting';
     }
-    const staleMs = (Date.now() / 1000) - parseInt(n.last_seen || 0);
+    const staleMs = (DATA.timestamp - parseInt(n.last_seen || 0));
     const stale   = staleMs > 300;
     const nameStyle = stale ? 'color:var(--muted)' : '';
     return `<tr>
