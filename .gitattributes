@@ -11,14 +11,31 @@
 *.rules text eol=lf
 *.env text eol=lf
 *.proto text eol=lf
+*.sh.bak text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+*.dts text eol=lf
+*.network.off text eol=lf
 rpi5/rpi5-install/etc/sudoers.d/* text eol=lf
-rpi5/rpi5-install/usr/local/bin/* text eol=lf
+rpi5/rpi5-install/etc/networkd-dispatcher/** text eol=lf
+rpi5/rpi5-install/root/carrier text eol=lf
+rpi5/rpi5-install/root/off text eol=lf
+rpi5/rpi5-install/root/routable.d-50-ethernet-detect text eol=lf
+rpi5/rpi5-install/root/networkd-dispatcher/* text eol=lf
+rpi5/rpi5-install/usr/lib/modules/**/modules.alias text eol=lf
+rpi5/rpi5-install/usr/lib/modules/**/modules.builtin text eol=lf
+rpi5/rpi5-install/usr/lib/modules/**/modules.dep text eol=lf
+rpi5/rpi5-install/usr/lib/modules/**/modules.devname text eol=lf
+rpi5/rpi5-install/usr/lib/modules/**/modules.order text eol=lf
+rpi5/rpi5-install/usr/lib/modules/**/modules.softdep text eol=lf
+rpi5/rpi5-install/usr/lib/modules/**/modules.symbols text eol=lf
 
 # Binary payloads and archives.
 *.bin binary
 *.ko binary
 *.ko.xz binary
 *.dtb binary
+*.dtbo binary
 *.img binary
 *.gz binary
 *.xz binary
@@ -26,4 +43,12 @@ rpi5/rpi5-install/usr/local/bin/* text eol=lf
 *.png binary
 *.jpg binary
 *.jpeg binary
+*.modinfo binary
+rpi5/rpi5-install/root/regulatory.db binary
+rpi5/rpi5-install/usr/local/bin/chronyc binary
+rpi5/rpi5-install/usr/local/bin/morse_cli binary
+rpi5/rpi5-install/usr/sbin/alfred binary
+rpi5/rpi5-install/usr/sbin/batctl binary
+rpi5/rpi5-install/usr/sbin/wpa_cli_s1g binary
+rpi5/rpi5-install/usr/sbin/wpa_supplicant_s1g binary
 *.svg text eol=lf
